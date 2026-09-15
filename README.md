@@ -6,7 +6,14 @@
 
 ## 現在の状態
 
-ロードマップP1（CPU参照実装）まで完了。D3Q19 + BGK、周期境界のソルバーが動作し、減衰Taylor-Green渦の解析解に対して2次精度の収束を確認済み（V&V-1）。
+CPU側は一通り動作し、解析解に対する検証を通っている。
+
+- **格子**: D3Q19（検証用）/ D3Q27（本番用）
+- **衝突演算子**: BGK と 中心モーメント（キュムラント緩和）。後者はせん断層で τ=0.5001（Re≈19万）まで安定
+- **境界条件**: 補間バウンスバック（曲面・回転壁）、運動量交換法による力とトルク
+- **乱流モデル**: Smagorinsky
+- **ジオメトリ**: 縫い目のパラメトリック生成と符号付き距離場
+- **GPU**: AAパターンのカーネルを実装済み。**未実行**（開発環境にGPUがないため）
 
 ## 動かし方
 
@@ -15,6 +22,15 @@ Julia 1.10以降が必要。
 ```bash
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
+
+### GPU（要 NVIDIA GPU）
+
+```bash
+julia --project=. -e 'using Pkg; Pkg.add(["CUDA", "StaticArrays"])'
+julia --project=. scripts/benchmark_gpu.jl
+```
+
+このスクリプトはタイミングを測る前に、GPUの結果がCPU参照実装と一致するか、Taylor-Green渦の減衰から粘性が正しく再現されるかを自己検証する。検証に失敗した場合はタイミングを出さずに停止する。
 
 ```julia
 using BreakingBallLBM

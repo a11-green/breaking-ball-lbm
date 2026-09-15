@@ -67,7 +67,7 @@ end
 Initialise the state from the analytic solution at `t = 0`, including the
 first-order off-equilibrium part.
 """
-function init!(s::LBMState{T}, tg::TaylorGreen{T}) where {T}
+function init!(s::LBMState{T}, tg::TaylorGreen) where {T}
     field = (i, j, k) -> begin
         x, y = i - 1, j - 1
         ux, uy, uz = velocity(tg, x, y, 0)
@@ -83,7 +83,7 @@ end
 L2 norm of the difference between the simulated and analytic velocity fields at
 time `t`, both absolute and relative to the analytic field.
 """
-function l2_velocity_error(s::LBMState{T}, tg::TaylorGreen{T}, t::Real) where {T}
+function l2_velocity_error(s::LBMState{T}, tg::TaylorGreen, t::Real) where {T}
     err = zero(T)
     ref = zero(T)
     @inbounds for k in 1:s.nz, j in 1:s.ny, i in 1:s.nx

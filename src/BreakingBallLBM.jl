@@ -16,6 +16,7 @@ include("core/lattice.jl")
 include("core/state.jl")
 include("core/collision.jl")
 include("core/central_moments.jl")
+include("core/aa_pattern.jl")
 include("core/streaming.jl")
 include("turbulence/smagorinsky.jl")
 include("boundary/links.jl")
@@ -34,6 +35,9 @@ export LBMState, Lattice, D3Q19, D3Q27,
     macroscopic, macroscopic!, macroscopic_fields, total_kinetic_energy,
     init_equilibrium!, init_with_gradients!,
     collide!, collide_central_moments!, stream!, step!, run!, fluid_velocity,
+    cube_velocity, cube_opposite, cube_weight, cube_equilibrium,
+    to_cube_order!, from_cube_order!, aa_gather!, aa_scatter!, collide_buffer!,
+    aa_step_node!, aa_run!, gpu_run!, gpu_backend_loaded,
     Smagorinsky, total_relaxation_time, eddy_viscosity, nonequilibrium_flux_norm,
     strain_rate_magnitude,
     BounceBackLinks, build_links, solid_mask, refine_delta,
@@ -43,5 +47,16 @@ export LBMState, Lattice, D3Q19, D3Q27,
     TaylorGreen, PoiseuilleChannel, poiseuille_velocity, poiseuille_peak, channel_sdf,
     sphere_sdf_field, sphere_sdf_fn, exact_sphere_delta,
     hasimoto_factor, stokes_drag, superficial_velocity
+
+"""
+    gpu_run!(g, nsteps, τ; force, operator, omega_bulk, omega_higher)
+
+Advance an AA-pattern state held on the device. Defined by the CUDA extension,
+so it needs `using CUDA, StaticArrays` before it resolves.
+"""
+function gpu_run! end
+
+"""Whether the CUDA extension has been loaded."""
+gpu_backend_loaded() = !isnothing(Base.get_extension(@__MODULE__, :BreakingBallLBMCUDAExt))
 
 end # module
