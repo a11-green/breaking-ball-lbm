@@ -1,16 +1,20 @@
 @testset "streaming" begin
+    lat = D3Q19()
+    NQL = nvelocities(lat)
+    CXL, CYL, CZL = cxs(lat), cys(lat), czs(lat)
+
     @testset "populations move one cell along their velocity" begin
         nx, ny, nz = 5, 4, 3
-        for q in 1:Q19
+        for q in 1:NQL
             s = LBMState(nx, ny, nz, 0.8)
             fill!(s.f, 0.0)
             i0, j0, k0 = 2, 3, 2
             s.f[i0, j0, k0, q] = 1.0
             stream!(s)
 
-            i1 = mod1(i0 + CX19[q], nx)
-            j1 = mod1(j0 + CY19[q], ny)
-            k1 = mod1(k0 + CZ19[q], nz)
+            i1 = mod1(i0 + CXL[q], nx)
+            j1 = mod1(j0 + CYL[q], ny)
+            k1 = mod1(k0 + CZL[q], nz)
             @test s.f[i1, j1, k1, q] == 1.0
             @test sum(s.f) == 1.0   # nothing created or lost
         end

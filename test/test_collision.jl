@@ -1,5 +1,7 @@
 @testset "equilibrium and collision" begin
-    c = (CX19, CY19, CZ19)
+    lat = D3Q19()
+    nq = nvelocities(lat)
+    c = (cxs(lat), cys(lat), czs(lat))
     δ(α, β) = α == β ? 1.0 : 0.0
 
     @testset "equilibrium moments" begin
@@ -7,23 +9,23 @@
                        (1.0, (0.05, 0.0, 0.0)),
                        (0.97, (0.02, -0.03, 0.01)),
                        (1.1, (-0.04, 0.05, -0.02)))
-            feq = [equilibrium(q, ρ, u...) for q in 1:Q19]
+            feq = [equilibrium(lat, q, ρ, u...) for q in 1:nq]
             @test sum(feq) ≈ ρ
             for α in 1:3
-                @test sum(feq[q] * c[α][q] for q in 1:Q19) ≈ ρ * u[α] atol = 1e-14
+                @test sum(feq[q] * c[α][q] for q in 1:nq) ≈ ρ * u[α] atol = 1e-14
             end
             # Momentum flux: ρ u_α u_β + ρ cs² δ_αβ (exact for the 2nd-order equilibrium).
             for α in 1:3, β in 1:3
-                m = sum(feq[q] * c[α][q] * c[β][q] for q in 1:Q19)
+                m = sum(feq[q] * c[α][q] * c[β][q] for q in 1:nq)
                 @test m ≈ ρ * u[α] * u[β] + ρ * CS2 * δ(α, β) atol = 1e-14
             end
         end
     end
 
     @testset "equilibrium is positive at pitch-relevant Mach numbers" begin
-        for q in 1:Q19
-            @test equilibrium(q, 1.0, 0.1, 0.0, 0.0) > 0
-            @test equilibrium(q, 1.0, 0.05, 0.05, 0.05) > 0
+        for q in 1:nq
+            @test equilibrium(lat, q, 1.0, 0.1, 0.0, 0.0) > 0
+            @test equilibrium(lat, q, 1.0, 0.05, 0.05, 0.05) > 0
         end
     end
 
@@ -31,7 +33,7 @@
         s = LBMState(6, 5, 4, 0.7)
         init_equilibrium!(s, (i, j, k) -> (1.0 + 0.01 * sin(i + 2j + 3k),
                                            0.02 * cos(i), 0.01 * sin(j), -0.015 * cos(k)))
-        s.f .+= 1e-4 .* [sin(i + j + k + q) for i in 1:6, j in 1:5, k in 1:4, q in 1:Q19]
+        s.f .+= 1e-4 .* [sin(i + j + k + q) for i in 1:6, j in 1:5, k in 1:4, q in 1:nq]
 
         before = [macroscopic(s, i, j, k) for i in 1:6, j in 1:5, k in 1:4]
         collide!(s)

@@ -31,6 +31,7 @@ function bounce_back_values!(vals::Vector{T}, s::LBMState{T}, links::BounceBackL
     rule in (:interpolated, :halfway) ||
         throw(ArgumentError("rule must be :interpolated or :halfway, got $rule"))
 
+    lat = s.lattice
     f = s.f
     nx, ny, nz = s.nx, s.ny, s.nz
     ωx, ωy, ωz = T.(spin)
@@ -41,11 +42,11 @@ function bounce_back_values!(vals::Vector{T}, s::LBMState{T}, links::BounceBackL
         i, j, k = Int(links.i[n]), Int(links.j[n]), Int(links.k[n])
         q = Int(links.q[n])
         qb = opposite(q)
-        cx, cy, cz = T(CX19[q]), T(CY19[q]), T(CZ19[q])
+        cx, cy, cz = T(cxs(lat)[q]), T(cys(lat)[q]), T(czs(lat)[q])
         δ = links.δ[n]
 
         ρw = zero(T)
-        for p in 1:Q19
+        for p in 1:nvelocities(lat)
             ρw += f[i, j, k, p]
         end
 
@@ -54,15 +55,15 @@ function bounce_back_values!(vals::Vector{T}, s::LBMState{T}, links::BounceBackL
         uwx = ωy * wz - ωz * wy
         uwy = ωz * wx - ωx * wz
         uwz = ωx * wy - ωy * wx
-        wall = 2 * T(W19[q]) * ρw * (cx * uwx + cy * uwy + cz * uwz) / T(CS2)
+        wall = 2 * T(weights(lat)[q]) * ρw * (cx * uwx + cy * uwy + cz * uwz) / T(CS2)
 
         fq = f[i, j, k, q]
         if rule === :halfway || (δ < 1 // 2 && !links.second_fluid[n])
             val = fq - wall
         elseif δ < 1 // 2
-            ib = mod1(i - CX19[q], nx)
-            jb = mod1(j - CY19[q], ny)
-            kb = mod1(k - CZ19[q], nz)
+            ib = mod1(i - cxs(lat)[q], nx)
+            jb = mod1(j - cys(lat)[q], ny)
+            kb = mod1(k - czs(lat)[q], nz)
             val = 2δ * fq + (1 - 2δ) * f[ib, jb, kb, q] - wall
         else
             val = fq / (2δ) + (2δ - 1) / (2δ) * f[i, j, k, qb] - wall / (2δ)
@@ -106,8 +107,8 @@ finite makes the fields safe to inspect and to write out.
 function init_solid!(s::LBMState{T}, solid::AbstractArray{Bool,3}) where {T}
     @inbounds for k in 1:s.nz, j in 1:s.ny, i in 1:s.nx
         solid[i, j, k] || continue
-        for q in 1:Q19
-            s.f[i, j, k, q] = equilibrium(q, one(T), zero(T), zero(T), zero(T))
+        for q in 1:nvelocities(s.lattice)
+            s.f[i, j, k, q] = equilibrium(s.lattice, q, one(T), zero(T), zero(T), zero(T))
         end
     end
     return s

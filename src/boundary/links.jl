@@ -13,7 +13,8 @@ the halfway case that plain bounce-back assumes.
 Stored as a struct of arrays: the GPU port walks these as a flat list.
 """
 
-struct BounceBackLinks{T<:AbstractFloat}
+struct BounceBackLinks{T<:AbstractFloat,L<:Lattice}
+    lattice::L
     i::Vector{Int32}
     j::Vector{Int32}
     k::Vector{Int32}
@@ -44,9 +45,9 @@ sphere of radius `R` the curvature leaves an O(1/R) error in δ, which at the
 handful-of-cells radii these grids afford is a percent-level error in the drag,
 so it is worth removing wherever the geometry can be evaluated analytically.
 """
-function refine_delta(sdf_fn, i::Integer, j::Integer, k::Integer, q::Integer,
-                      δ0::T; iterations::Integer = 40) where {T}
-    cx, cy, cz = CX19[q], CY19[q], CZ19[q]
+function refine_delta(sdf_fn, lat::Lattice, i::Integer, j::Integer, k::Integer,
+                      q::Integer, δ0::T; iterations::Integer = 40) where {T}
+    cx, cy, cz = cxs(lat)[q], cys(lat)[q], czs(lat)[q]
     at(t) = sdf_fn((T(i) + t * cx, T(j) + t * cy, T(k) + t * cz))
     lo, hi = zero(T), one(T)
     at(lo) > 0 && at(hi) < 0 || return δ0        # not bracketed: keep the guess
@@ -71,7 +72,7 @@ than linearly interpolated between the two nodes.
 """
 function build_links(ϕ::Array{T,3};
                      center::NTuple{3,<:Real} = (size(ϕ) .+ 1) ./ 2,
-                     sdf_fn = nothing) where {T}
+                     sdf_fn = nothing, lattice::Lattice = D3Q19()) where {T}
     nx, ny, nz = size(ϕ)
     solid = solid_mask(ϕ)
     c = T.(center)
@@ -82,15 +83,15 @@ function build_links(ϕ::Array{T,3};
     @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
         solid[i, j, k] && continue
         φf = ϕ[i, j, k]
-        for q in 2:Q19
-            cx, cy, cz = CX19[q], CY19[q], CZ19[q]
+        for q in 2:nvelocities(lattice)
+            cx, cy, cz = cxs(lattice)[q], cys(lattice)[q], czs(lattice)[q]
             is, js, ks = mod1(i + cx, nx), mod1(j + cy, ny), mod1(k + cz, nz)
             solid[is, js, ks] || continue
 
             φs = ϕ[is, js, ks]
             δ = φf / (φf - φs)                      # φf > 0 > φs, so δ ∈ (0, 1)
             if sdf_fn !== nothing
-                δ = refine_delta(sdf_fn, i, j, k, q, δ)
+                δ = refine_delta(sdf_fn, lattice, i, j, k, q, δ)
             end
             δ = clamp(δ, T(1e-3), one(T))
 
@@ -103,5 +104,5 @@ function build_links(ϕ::Array{T,3};
             push!(lsecond, !solid[ib, jb, kb])
         end
     end
-    return BounceBackLinks{T}(li, lj, lk, lq, lδ, lxw, lsecond, c)
+    return BounceBackLinks(lattice, li, lj, lk, lq, lδ, lxw, lsecond, c)
 end

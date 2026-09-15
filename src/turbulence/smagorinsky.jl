@@ -55,17 +55,18 @@ Subgrid viscosity implied by `total_relaxation_time`, in lattice units.
 end
 
 """
-    nonequilibrium_flux_norm(f, i, j, k, ρ, ux, uy, uz)
+    nonequilibrium_flux_norm(s, i, j, k, ρ, ux, uy, uz)
 
 `‖Π‖ = √(Π_αβ Π_αβ)` at node `(i, j, k)`, where
 `Π_αβ = Σ_q c_qα c_qβ (f_q - f_q^eq)`.
 """
-@inline function nonequilibrium_flux_norm(f::Array{T,4}, i::Integer, j::Integer, k::Integer,
+@inline function nonequilibrium_flux_norm(s::LBMState{T}, i::Integer, j::Integer, k::Integer,
                                           ρ::T, ux::T, uy::T, uz::T) where {T}
+    lat = s.lattice
     Πxx = Πyy = Πzz = Πxy = Πxz = Πyz = zero(T)
-    @inbounds for q in 1:Q19
-        fneq = f[i, j, k, q] - equilibrium(q, ρ, ux, uy, uz)
-        cx, cy, cz = T(CX19[q]), T(CY19[q]), T(CZ19[q])
+    @inbounds for q in 1:nvelocities(lat)
+        fneq = s.f[i, j, k, q] - equilibrium(lat, q, ρ, ux, uy, uz)
+        cx, cy, cz = T(cxs(lat)[q]), T(cys(lat)[q]), T(czs(lat)[q])
         Πxx += cx * cx * fneq
         Πyy += cy * cy * fneq
         Πzz += cz * cz * fneq

@@ -6,7 +6,8 @@ direction `q` consecutive `x` are contiguous in memory — the layout the GPU po
 (P2) needs for coalesced access.
 """
 
-mutable struct LBMState{T<:AbstractFloat}
+mutable struct LBMState{T<:AbstractFloat,L<:Lattice}
+    const lattice::L
     const nx::Int
     const ny::Int
     const nz::Int
@@ -15,16 +16,24 @@ mutable struct LBMState{T<:AbstractFloat}
     fnew::Array{T,4}
 end
 
-function LBMState{T}(nx::Integer, ny::Integer, nz::Integer, τ::Real) where {T<:AbstractFloat}
+"""
+    LBMState(nx, ny, nz, τ; lattice = D3Q19())
+
+Allocate a state on an `nx × ny × nz` grid with BGK relaxation time `τ`.
+"""
+function LBMState{T}(nx::Integer, ny::Integer, nz::Integer, τ::Real;
+                     lattice::Lattice = D3Q19()) where {T<:AbstractFloat}
     τ > 0.5 || throw(ArgumentError("τ must exceed 0.5 for a positive viscosity (got $τ)"))
-    f = Array{T,4}(undef, nx, ny, nz, Q19)
-    return LBMState{T}(nx, ny, nz, T(τ), f, similar(f))
+    f = Array{T,4}(undef, nx, ny, nz, nvelocities(lattice))
+    return LBMState(lattice, Int(nx), Int(ny), Int(nz), T(τ), f, similar(f))
 end
 
-LBMState(nx::Integer, ny::Integer, nz::Integer, τ::Real) = LBMState{Float64}(nx, ny, nz, τ)
+LBMState(nx::Integer, ny::Integer, nz::Integer, τ::Real; kwargs...) =
+    LBMState{Float64}(nx, ny, nz, τ; kwargs...)
 
 Base.eltype(::LBMState{T}) where {T} = T
 Base.size(s::LBMState) = (s.nx, s.ny, s.nz)
+nvelocities(s::LBMState) = nvelocities(s.lattice)
 viscosity(s::LBMState) = viscosity_from_tau(s.τ)
 
 """
@@ -33,16 +42,18 @@ viscosity(s::LBMState) = viscosity_from_tau(s.τ)
 Zeroth and first moments of the populations at one node.
 """
 @inline function macroscopic(s::LBMState{T}, i::Integer, j::Integer, k::Integer) where {T}
+    lat = s.lattice
+    cx, cy, cz = cxs(lat), cys(lat), czs(lat)
     ρ = zero(T)
     mx = zero(T)
     my = zero(T)
     mz = zero(T)
-    @inbounds for q in 1:Q19
+    @inbounds for q in 1:nvelocities(lat)
         fq = s.f[i, j, k, q]
         ρ += fq
-        mx += T(CX19[q]) * fq
-        my += T(CY19[q]) * fq
-        mz += T(CZ19[q]) * fq
+        mx += T(cx[q]) * fq
+        my += T(cy[q]) * fq
+        mz += T(cz[q]) * fq
     end
     return ρ, mx / ρ, my / ρ, mz / ρ
 end
@@ -95,10 +106,11 @@ end
 Initialise every node from `field(i, j, k) -> (ρ, ux, uy, uz)` at equilibrium.
 """
 function init_equilibrium!(s::LBMState{T}, field) where {T}
+    lat = s.lattice
     @inbounds for k in 1:s.nz, j in 1:s.ny, i in 1:s.nx
         ρ, ux, uy, uz = field(i, j, k)
-        for q in 1:Q19
-            s.f[i, j, k, q] = equilibrium(q, T(ρ), T(ux), T(uy), T(uz))
+        for q in 1:nvelocities(lat)
+            s.f[i, j, k, q] = equilibrium(lat, q, T(ρ), T(ux), T(uy), T(uz))
         end
     end
     return s
@@ -113,13 +125,14 @@ off-equilibrium part built from `gradient(i, j, k) -> ∇u` (a 3×3 matrix with
 pure-equilibrium start would otherwise introduce.
 """
 function init_with_gradients!(s::LBMState{T}, field, gradient) where {T}
+    lat = s.lattice
     ∇u = Matrix{T}(undef, 3, 3)
     @inbounds for k in 1:s.nz, j in 1:s.ny, i in 1:s.nx
         ρ, ux, uy, uz = field(i, j, k)
         ∇u .= gradient(i, j, k)
-        for q in 1:Q19
-            s.f[i, j, k, q] = equilibrium(q, T(ρ), T(ux), T(uy), T(uz)) +
-                              nonequilibrium(q, T(ρ), s.τ, ∇u)
+        for q in 1:nvelocities(lat)
+            s.f[i, j, k, q] = equilibrium(lat, q, T(ρ), T(ux), T(uy), T(uz)) +
+                              nonequilibrium(lat, q, T(ρ), s.τ, ∇u)
         end
     end
     return s

@@ -30,7 +30,7 @@
         s = LBMState(4, 4, 4, τ0)
         init_equilibrium!(s, (i, j, k) -> (1.0, 0.02, -0.01, 0.005))
         ρ, ux, uy, uz = macroscopic(s, 2, 2, 2)
-        @test nonequilibrium_flux_norm(s.f, 2, 2, 2, ρ, ux, uy, uz) < 1e-15
+        @test nonequilibrium_flux_norm(s, 2, 2, 2, ρ, ux, uy, uz) < 1e-15
     end
 
     @testset "collision with cs = 0 matches plain BGK" begin

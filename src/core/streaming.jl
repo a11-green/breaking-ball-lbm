@@ -11,11 +11,12 @@ memory traffic is a GPU-side concern and lands with the CUDA port (P2).
 Propagate `f[x, y, z, q]` to `x + c_q`, then swap buffers.
 """
 function stream!(s::LBMState{T}) where {T}
+    lat = s.lattice
     f = s.f
     fnew = s.fnew
     nx, ny, nz = s.nx, s.ny, s.nz
-    @inbounds for q in 1:Q19
-        cx, cy, cz = CX19[q], CY19[q], CZ19[q]
+    @inbounds for q in 1:nvelocities(lat)
+        cx, cy, cz = cxs(lat)[q], cys(lat)[q], czs(lat)[q]
         for k in 1:nz
             kd = mod1(k + cz, nz)
             for j in 1:ny
@@ -31,24 +32,26 @@ function stream!(s::LBMState{T}) where {T}
 end
 
 """
-    step!(s)
+    step!(s; kwargs...)
 
-One full LBM time step: collide, then stream.
+One full LBM time step: collide, then stream. Keyword arguments are passed to
+[`collide!`](@ref).
 """
-function step!(s::LBMState)
-    collide!(s)
+function step!(s::LBMState; kwargs...)
+    collide!(s; kwargs...)
     stream!(s)
     return s
 end
 
 """
-    run!(s, nsteps; callback = nothing)
+    run!(s, nsteps; callback = nothing, kwargs...)
 
-Advance `nsteps` time steps. `callback(s, step)` runs after each step when given.
+Advance `nsteps` time steps. `callback(s, step)` runs after each step when given;
+remaining keyword arguments are passed to [`collide!`](@ref).
 """
-function run!(s::LBMState, nsteps::Integer; callback = nothing)
+function run!(s::LBMState, nsteps::Integer; callback = nothing, kwargs...)
     for n in 1:nsteps
-        step!(s)
+        step!(s; kwargs...)
         callback === nothing || callback(s, n)
     end
     return s

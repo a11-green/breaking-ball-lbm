@@ -4,14 +4,18 @@
 Lattice Boltzmann solver for the aerodynamics and trajectory of a spinning,
 seamed baseball. See `docs/design/DESIGN.md` for the theory and the roadmap.
 
-This is the P1 stage: a CPU reference implementation (D3Q19 + BGK, periodic
-domain) verified against the decaying Taylor-Green vortex.
+CPU reference implementation. D3Q19 and D3Q27 lattices; BGK for verification
+against analytic solutions and a central-moment operator for the high-Reynolds
+production runs; Smagorinsky subgrid viscosity; interpolated bounce-back on
+curved, rotating walls with momentum-exchange forces; and the parametric seam
+geometry of the ball.
 """
 module BreakingBallLBM
 
 include("core/lattice.jl")
 include("core/state.jl")
 include("core/collision.jl")
+include("core/central_moments.jl")
 include("core/streaming.jl")
 include("turbulence/smagorinsky.jl")
 include("boundary/links.jl")
@@ -22,13 +26,14 @@ include("validation/taylor_green.jl")
 include("validation/poiseuille.jl")
 include("validation/sphere_array.jl")
 
-export LBMState,
-    Q19, CS2, W19, CX19, CY19, CZ19,
+export LBMState, Lattice, D3Q19, D3Q27,
+    CS2, nvelocities, cxs, cys, czs, weights,
+    CX19, CY19, CZ19, W19, CX27, CY27, CZ27, W27,
     opposite, equilibrium, nonequilibrium,
     viscosity, viscosity_from_tau, tau_from_viscosity,
     macroscopic, macroscopic!, macroscopic_fields, total_kinetic_energy,
     init_equilibrium!, init_with_gradients!,
-    collide!, stream!, step!, run!, fluid_velocity,
+    collide!, collide_central_moments!, stream!, step!, run!, fluid_velocity,
     Smagorinsky, total_relaxation_time, eddy_viscosity, nonequilibrium_flux_norm,
     strain_rate_magnitude,
     BounceBackLinks, build_links, solid_mask, refine_delta,

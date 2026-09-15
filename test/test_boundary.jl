@@ -1,15 +1,19 @@
 @testset "walls, bounce-back and wall force" begin
+    lat = D3Q19()
+    NQL = nvelocities(lat)
+    CXL, CYL, CZL = cxs(lat), cys(lat), czs(lat)
+
 
     """Raw momentum Σ_q f_q c_q summed over fluid nodes."""
     function fluid_momentum(s, solid)
         p = zeros(Float64, 3)
         for k in 1:s.nz, j in 1:s.ny, i in 1:s.nx
             solid[i, j, k] && continue
-            for q in 1:Q19
+            for q in 1:NQL
                 fq = s.f[i, j, k, q]
-                p[1] += CX19[q] * fq
-                p[2] += CY19[q] * fq
-                p[3] += CZ19[q] * fq
+                p[1] += CXL[q] * fq
+                p[2] += CYL[q] * fq
+                p[3] += CZL[q] * fq
             end
         end
         return (p[1], p[2], p[3])
@@ -27,7 +31,7 @@
         for n in eachindex(links.q)
             i, j, k, q = links.i[n], links.j[n], links.k[n], Int(links.q[n])
             @test !solid[i, j, k]                                    # links start in fluid
-            ns = (mod1(i + CX19[q], 20), mod1(j + CY19[q], 20), mod1(k + CZ19[q], 20))
+            ns = (mod1(i + CXL[q], 20), mod1(j + CYL[q], 20), mod1(k + CZL[q], 20))
             @test solid[ns...]                                       # and point into solid
         end
 
@@ -35,8 +39,8 @@
         expected = 0
         for k in 1:20, j in 1:20, i in 1:20
             solid[i, j, k] && continue
-            for q in 2:Q19
-                solid[mod1(i + CX19[q], 20), mod1(j + CY19[q], 20), mod1(k + CZ19[q], 20)] &&
+            for q in 2:NQL
+                solid[mod1(i + CXL[q], 20), mod1(j + CYL[q], 20), mod1(k + CZL[q], 20)] &&
                     (expected += 1)
             end
         end
@@ -47,7 +51,7 @@
         center = (dims .+ 1) ./ 2
         for n in eachindex(links.q)
             q = Int(links.q[n])
-            (CX19[q]^2 + CY19[q]^2 + CZ19[q]^2) == 1 || continue
+            (CXL[q]^2 + CYL[q]^2 + CZL[q]^2) == 1 || continue
             xw = links.xw[n]
             @test sqrt(xw[1]^2 + xw[2]^2 + xw[3]^2) ≈ R rtol = 0.05
         end
@@ -67,7 +71,7 @@
         for n in eachindex(refined.q)
             q = Int(refined.q[n])
             p = (linear.i[n] - center[1], linear.j[n] - center[2], linear.k[n] - center[3])
-            exact = exact_sphere_delta(p, (CX19[q], CY19[q], CZ19[q]), R)
+            exact = exact_sphere_delta(p, (CXL[q], CYL[q], CZL[q]), R)
             @test refined.δ[n] ≈ exact atol = 1e-9
             err_linear = max(err_linear, abs(linear.δ[n] - exact))
             err_refined = max(err_refined, abs(refined.δ[n] - exact))
