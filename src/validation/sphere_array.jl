@@ -31,6 +31,33 @@ sphere_sdf_field(dims::NTuple{3,<:Integer}, radius::Real; kwargs...) =
     sphere_sdf_field(Float64, dims, radius; kwargs...)
 
 """
+    sphere_sdf_fn(dims, radius; center)
+
+Signed distance to the same sphere at an arbitrary, possibly fractional node
+position — the analytic evaluator [`build_links`](@ref) refines wall fractions
+against.
+"""
+function sphere_sdf_fn(dims::NTuple{3,<:Integer}, radius::Real;
+                       center::NTuple{3,<:Real} = (dims .+ 1) ./ 2)
+    return p -> sqrt((p[1] - center[1])^2 + (p[2] - center[2])^2 + (p[3] - center[3])^2) - radius
+end
+
+"""
+    exact_sphere_delta(p, c, radius)
+
+Wall fraction along a link from `p` (relative to the sphere centre) in direction
+`c`, from the exact quadratic `|p + t c| = radius`.
+"""
+function exact_sphere_delta(p::NTuple{3,<:Real}, c::NTuple{3,<:Real}, radius::Real)
+    cc = c[1]^2 + c[2]^2 + c[3]^2
+    pc = p[1] * c[1] + p[2] * c[2] + p[3] * c[3]
+    pp = p[1]^2 + p[2]^2 + p[3]^2
+    disc = pc^2 - cc * (pp - radius^2)
+    disc < 0 && return NaN
+    return (-pc - sqrt(disc)) / cc
+end
+
+"""
     hasimoto_factor(radius, box)
 
 Drag enhancement `K` of a simple cubic array over an isolated sphere, from

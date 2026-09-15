@@ -53,6 +53,36 @@
         end
     end
 
+    @testset "refined wall fractions are exact on a curved wall" begin
+        dims = (20, 20, 20)
+        R = 6.0
+        center = (dims .+ 1) ./ 2
+        ϕ = sphere_sdf_field(dims, R)
+        linear = build_links(ϕ)
+        refined = build_links(ϕ; sdf_fn = sphere_sdf_fn(dims, R))
+
+        @test length(refined) == length(linear)
+        err_linear = 0.0
+        err_refined = 0.0
+        for n in eachindex(refined.q)
+            q = Int(refined.q[n])
+            p = (linear.i[n] - center[1], linear.j[n] - center[2], linear.k[n] - center[3])
+            exact = exact_sphere_delta(p, (CX19[q], CY19[q], CZ19[q]), R)
+            @test refined.δ[n] ≈ exact atol = 1e-9
+            err_linear = max(err_linear, abs(linear.δ[n] - exact))
+            err_refined = max(err_refined, abs(refined.δ[n] - exact))
+        end
+        # Linear interpolation is off by a few percent of a cell on this curvature.
+        @test err_linear > 0.01
+        @test err_refined < 1e-9
+
+        # The wall points then sit on the sphere to machine precision.
+        for n in eachindex(refined.q)
+            xw = refined.xw[n]
+            @test sqrt(xw[1]^2 + xw[2]^2 + xw[3]^2) ≈ R atol = 1e-9
+        end
+    end
+
     @testset "momentum balance is exact" begin
         # Δ(fluid momentum) = (body force on every fluid node) - (force on the wall).
         # This holds step by step, to round-off, for either bounce-back rule.

@@ -3,7 +3,10 @@
 # V&V-2 (creeping-flow limit): drag on a sphere in a periodic cubic array,
 # against Hasimoto's analytic solution. A body force drives the flow; at steady
 # state the wall force balances it, and the resulting superficial velocity gives
-# the drag coefficient to compare.
+# the drag to compare.
+#
+# The body force is scaled as 1/L³ so that every resolution runs at the same
+# Reynolds number and the only thing changing is the grid.
 #
 # Run: julia --project=. scripts/validate_sphere_drag.jl
 
@@ -12,16 +15,19 @@ using Printf
 
 const τ = 1.0
 const RATIO = 1 / 6          # sphere radius / box size, fixed across resolutions
-const GFORCE = 1.0e-6        # body force per node, sets the Reynolds number
+const L0 = 24
+const G0 = 1.0e-6            # body force at L0; scaled as (L0/L)³ to hold Re fixed
 
-function run_case(L::Int; rule::Symbol = :interpolated, tol = 1e-5, maxsteps = 40_000)
+function run_case(L::Int; rule::Symbol = :interpolated, refine::Bool = true,
+                  tol = 1e-5, maxsteps = 60_000)
     R = L * RATIO
     ν = viscosity_from_tau(τ)
-    ϕ = sphere_sdf_field((L, L, L), R)
+    dims = (L, L, L)
+    ϕ = sphere_sdf_field(dims, R)
     solid = solid_mask(ϕ)
-    links = build_links(ϕ)
+    links = build_links(ϕ; sdf_fn = refine ? sphere_sdf_fn(dims, R) : nothing)
     vals = zeros(Float64, length(links))
-    g = (GFORCE, 0.0, 0.0)
+    g = (G0 * (L0 / L)^3, 0.0, 0.0)
 
     s = LBMState(L, L, L, τ)
     init_equilibrium!(s, (i, j, k) -> (1.0, 0.0, 0.0, 0.0))
@@ -43,29 +49,26 @@ function run_case(L::Int; rule::Symbol = :interpolated, tol = 1e-5, maxsteps = 4
     end
 
     u = superficial_velocity(s, solid, g)
-    μ = ν                                   # ρ₀ = 1 in lattice units
-    predicted = stokes_drag(R, μ, u) * hasimoto_factor(R, L)
-    re = u * 2R / ν
-    nfluid = count(!, solid)
-
-    return (; L, R, steps, drag, u, re, predicted,
-            ratio = drag / predicted,
-            balance = drag / (nfluid * GFORCE))
+    predicted = stokes_drag(R, ν, u) * hasimoto_factor(R, L)   # ρ₀ = 1, so μ = ν
+    return (; L, R, steps, drag, u, re = u * 2R / ν, ratio = drag / predicted,
+            balance = drag / (count(!, solid) * g[1]))
 end
 
 function main()
-    println("Sphere in a periodic cubic array, a/L = 1/6, τ = $τ")
+    println("Sphere in a periodic cubic array, a/L = 1/6, τ = $τ, Re held fixed")
     println("Hasimoto factor K = ", round(hasimoto_factor(RATIO, 1.0), digits = 4))
     println()
-    @printf("%-6s %-6s %-8s %-12s %-11s %-9s %-10s %-10s\n",
-            "rule", "L", "steps", "drag", "U", "Re", "drag/theory", "F/Σg")
-    for rule in (:interpolated, :halfway)
-        for L in (24, 36, 48)
-            r = run_case(L; rule = rule)
-            @printf("%-6s %-6d %-8d %-12.6e %-11.4e %-9.4f %-10.4f %-10.6f\n",
-                    rule, r.L, r.steps, r.drag, r.u, r.re, r.ratio, r.balance)
-            flush(stdout)
-        end
+    @printf("%-14s %-10s %-4s %-7s %-12s %-11s %-8s %-11s %-9s\n",
+            "rule", "δ", "L", "steps", "drag", "U", "Re", "drag/theory", "F/Σg")
+    cases = [(:interpolated, true, L) for L in (24, 36, 48)]
+    append!(cases, [(:interpolated, false, L) for L in (24, 36, 48)])
+    append!(cases, [(:halfway, false, L) for L in (24, 48)])
+    for (rule, refine, L) in cases
+        r = run_case(L; rule = rule, refine = refine)
+        @printf("%-14s %-10s %-4d %-7d %-12.6e %-11.4e %-8.4f %-11.4f %-9.6f\n",
+                rule, refine ? "refined" : "linear", r.L, r.steps, r.drag, r.u,
+                r.re, r.ratio, r.balance)
+        flush(stdout)
     end
 end
 
