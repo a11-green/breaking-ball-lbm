@@ -1,0 +1,14 @@
+# Julia
+Manifest.toml
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+/docs/build/
+
+# Simulation output
+*.vtk
+*.vti
+*.vtr
+*.pvd
+*.h5
+output/
