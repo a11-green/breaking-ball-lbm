@@ -6,5 +6,6 @@ const BBL = BreakingBallLBM
     include("test_lattice.jl")
     include("test_collision.jl")
     include("test_streaming.jl")
+    include("test_geometry.jl")
     include("test_taylor_green.jl")
 end

@@ -13,6 +13,8 @@ include("core/lattice.jl")
 include("core/state.jl")
 include("core/collision.jl")
 include("core/streaming.jl")
+include("geometry/seam.jl")
+include("geometry/sdf.jl")
 include("validation/taylor_green.jl")
 
 export LBMState,
@@ -22,6 +24,8 @@ export LBMState,
     macroscopic, macroscopic!, macroscopic_fields, total_kinetic_energy,
     init_equilibrium!, init_with_gradients!,
     collide!, stream!, step!, run!,
+    BaseballSeam, seam_point, seam_polyline, seam_length,
+    BaseballGeometry, sdf, sphere_sdf, sdf_field, sdf_field!, solid_volume,
     TaylorGreen
 
 end # module
