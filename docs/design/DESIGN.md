@@ -1,7 +1,7 @@
 # 変化球軌道シミュレーション 設計書
 
 **プロジェクト名:** breaking-ball-lbm
-**版:** v0.2（方針確定：密結合方式／Julia／単一GPU実行）
+**版:** v0.3（検証ケース確定：WBC2023決勝 大谷翔平対トラウト最終球）
 **作成日:** 2026-09-15
 
 ---
@@ -377,12 +377,17 @@ ball:
   # stl_path: "data/geometry/seam_scan.stl"
 
 pitch:
-  initial_speed_mps: 38.0
-  spin_rpm: 2400
-  spin_axis_deg: {tilt: 12, yaw: 3}     # スピン軸の向き（バックスピン/サイドスピン/ジャイロ成分の合成）
-  seam_phase_deg: 45                    # 縫い目パターンに対する初期位相角
+  # ケース例: WBC2023決勝、大谷翔平→トラウト、9回2死フルカウントの最終球
+  # (Statcast分類は「スウィーパー」。球速・回転数・変化量は実測値、
+  #  スピン軸の詳細角度は未確定 — §11参照)
+  name: "wbc2023_final_ohtani_vs_trout_pitch6"
+  initial_speed_mps: 38.99      # 87.2 mph 実測値
+  spin_rpm: 2708                 # 実測値
+  spin_axis_deg: {tilt: 12, yaw: 3}     # 仮値。実測スピン軸が未確認のため要調整（§11）
+  seam_phase_deg: 45                    # 縫い目パターンに対する初期位相角（仮値）
   release_point_m: [0.0, 0.0, 1.8]
   flight_distance_m: 18.44
+  reference_measured_break_m: {horizontal: 0.432, vertical: 0.813}  # Statcast実測（比較用）
 
 environment:
   air_density_kgm3: 1.225
@@ -428,7 +433,21 @@ output:
 4. **V&V-4（縫い目球検証）**：縫い目付き球体を固定・一様流中に置いた場合の \(C_D\)、\(C_L\) を実測データ（Kensrud thesis、Nathanらの投球データ）と比較し、縫い目向き依存性・非マグヌス力の再現性を確認（密結合ループの助走・スピンアップ段階を流用できる）。
 5. **V&V-5（軌道検証）**：既知の実測ピッチトラッキングデータ（球速・回転数・回転軸から実測された変化量）と、密結合シミュレーションの軌道出力を比較。
 
-各段階の合格基準（許容誤差、例：\(C_D\)誤差10%以内等）は`test/`にケースごとの期待値とともに定義する。
+   **確定した検証ケース：WBC2023決勝、大谷翔平の対トラウト最終球（2023年3月21日、9回裏2死フルカウント）**
+
+   | 項目 | 実測値（出典） |
+   |---|---|
+   | 球種（Statcast分類） | スウィーパー（報道上は「スライダー」だが、通常のスライダーよりサイドスピン成分が強い変化球） |
+   | 球速 | 87.2 mph ≈ 38.99 m/s |
+   | スピン量 | 2,708 rpm |
+   | 横変化量 | 17 inch ≈ 0.432 m |
+   | 縦変化量 | 32 inch ≈ 0.813 m |
+
+   出典: [CBS Sports](https://www.cbssports.com/mlb/news/shohei-ohtani-vs-mike-trout-breaking-down-wbcs-epic-final-at-bat-and-the-off-the-charts-slider-to-end-it/), [SI](https://www.si.com/extra-mustard/2023/03/22/shohei-ohtani-mike-trout-wbc-strikeout-stat)
+
+   球速・回転数はシミュレーションの初期条件として直接使用し、横変化量・縦変化量（Statcast定義：無回転球を基準とした相対変化）をシミュレーション軌道から同一定義で算出した値と比較することで、本ケースの合格基準とする。**スピン軸の正確な向き（チルト角・ヨー角）とリリースポイント座標は現時点で未確認**であり、Baseball Savant（Statcast検索）等での確認、または合格基準を満たすようスピン軸を逆推定するキャリブレーションのいずれかで補う（§11）。
+
+各段階の合格基準（許容誤差、例：\(C_D\)誤差10%以内、V&V-5は変化量誤差20%以内を暫定目標）は`test/`にケースごとの期待値とともに定義する。
 
 ---
 
@@ -441,7 +460,7 @@ output:
 | P2 | CUDA.jlによる単一GPU実装（collide-stream融合カーネル、補間バウンスバック）。RTX 3060 Ti上でMLUPS実測、§6.6の見積り較正 |
 | P3 | 回転滑面球検証（V&V-2, 3）。縫い目ジオメトリ（パラメトリック）・LES（Cumulant+WALE）実装、固定縫い目球の検証（V&V-4） |
 | P4 | ボール追従座標系＋6DOF密結合ループの実装（§4.4, §5）。局所グリッドリファインメントの導入 |
-| P5 | 検証したい少数条件（3〜5条件程度、要確定）での本番実行、軌道検証（V&V-5） |
+| P5 | 確定した検証ケース（WBC2023決勝、大谷翔平対トラウト最終球のスウィーパー。§8のV&V-5参照）での本番実行、実測変化量との比較 |
 | P6 | 可視化・レポート自動化。（任意）将来の疎結合方式・多条件スタディへの拡張検討 |
 
 ---
@@ -461,15 +480,18 @@ output:
 - "GPU accelerated lattice Boltzmann simulation for rotational turbulence." https://www.sciencedirect.com/science/article/pii/S0898122113005816
 - "Synthetic turbulence generator for lattice Boltzmann method at the interface between RANS and LES." https://arxiv.org/pdf/2205.02774
 - "Large-Scale Simulations of Turbulent Flows using Lattice Boltzmann Methods on Heterogeneous High Performance Computers." https://arxiv.org/pdf/2506.21804
+- "Shohei Ohtani vs. Mike Trout: Breaking down WBC's epic final at-bat and the off-the-charts slider to end it," CBS Sports, 2023（V&V-5検証ケースの実測値出典）. https://www.cbssports.com/mlb/news/shohei-ohtani-vs-mike-trout-breaking-down-wbcs-epic-final-at-bat-and-the-off-the-charts-slider-to-end-it/
+- "Shohei Ohtani, Mike Trout WBC strikeout stat," Sports Illustrated, 2023. https://www.si.com/extra-mustard/2023/03/22/shohei-ohtani-mike-trout-wbc-strikeout-stat
 
 ---
 
 ## 11. 未決事項・要確認（次段階でユーザー確認したい点）
 
-- **具体的な検証条件（数条件の中身）**：球速・回転数・回転軸の向き（例：4シーム速球、スライダー、カーブなど）を何パターン、どの組み合わせで検証したいか。P5着手前に確定したい。
+- **スピン軸の向き・リリースポイントの特定**：V&V-5の検証ケース（WBC2023決勝、大谷翔平対トラウト最終球）について、球速・回転数・横縦変化量は実測値が判明したが、正確なスピン軸角度（チルト・ヨー）とリリースポイント座標は未確認。Baseball Savant等で当該球のStatcast詳細データ（spin axis, active spin%, release extension）が取得できるか確認するか、取得できない場合は実測の変化量に一致するようスピン軸を逆推定するキャリブレーション手順を用意する。
 - **縫い目ジオメトリの精度確認**：§4.1のパラメトリック生成モデルを、実際の写真・公開寸法図と目視ベースで調整する想定だが、この精度で妥当か、もしくは追加の参考資料（実測寸法図等）があれば提供いただきたい。
 - **本番解像度の最終決定**：§6.5・§6.6は計画段階の概算のため、P2でのMLUPS実測後、解像度と計算時間のトレードオフを再確認したい（例：1条件20時間を許容できるか、もっと短くしたいか）。
 - ~~開発言語~~ → **Julia（CUDA.jl）に確定**
 - ~~密結合/疎結合~~ → **密結合方式に確定**（将来の多条件スタディでは疎結合への切替を推奨）
 - ~~実行環境~~ → **単一GPU（RTX 3060 Ti）+ i5-13400K + 32GBメモリに確定**
 - ~~縫い目形状の入力方法~~ → **オープンなSTLは未確認のため、実測寸法に基づくパラメトリック生成を既定とし、STL読込にも対応できるインターフェースを用意**
+- ~~具体的な検証条件~~ → **WBC2023決勝、大谷翔平対トラウト最終球（スウィーパー、87.2mph/2708rpm、横43.2cm・縦81.3cm変化）に確定**（§8 V&V-5）
