@@ -129,6 +129,56 @@ function check_walls(::Type{T}; n = 20, radius = 5.0, steps = 6,
     return ok
 end
 
+"""
+Does the whole coupled loop agree between host and device?
+
+This is the strongest check in the file, because it exercises everything at
+once: the wall kernel's accumulating reduction, the box-mean velocity, the
+controller, the unit conversions and the 6DOF step. Two implementations that
+share only the physics have to produce the same ball.
+"""
+function check_coupling(::Type{T}; n = 20, radius = 3.5, cycles = 6,
+                        substeps = 10) where {T}
+    dims = (n, n, n)
+    units = LatticeUnits(T; nodes_per_diameter = 7, speed = 39.0,
+                         lattice_speed = 0.05, ν = 39.0 * 0.0748 / 40)
+    props = BaseballProperties(T)
+    ϕ = sphere_sdf_field(T, dims, radius)
+    wall = build_wall_field(ϕ; sdf_fn = sphere_sdf_fn(dims, radius))
+
+    s = LBMState{T}(dims..., units.τ; lattice = D3Q27())
+    init_equilibrium!(s, (i, j, k) -> (1.0, -0.05, 0.0, 0.0))
+    g_cpu = to_cube_order!(similar(s.f), s.f)
+    g_gpu = CuArray(copy(g_cpu))
+    dflow = gpu_flow(wall)
+
+    zero3 = (T(0), T(0), T(0))
+    ρc, uc = mean_fluid_velocity(g_cpu, wall, zero3)
+    ρd, ud = flow_mean_velocity(g_gpu, dflow, zero3)
+    mean_err = max(abs(ρd / ρc - 1), maximum(abs.(collect(ud) .- collect(uc))) / 0.05)
+
+    ball = BallState(T; position = (2.0, 0.0, 1.8), velocity = (39.0, 0.0, 0.0),
+                     spin = spin_from_rpm((0.0, 0.0, 1.0), 2708))
+    run = PitchRun(units, props; substeps = substeps, control_time = 20 * substeps)
+    st_cpu = PitchState(ball)
+    st_gpu = PitchState(ball)
+    for _ in 1:cycles
+        couple_step!(g_cpu, run, st_cpu, wall)
+        couple_step!(g_gpu, run, st_gpu, dflow)
+    end
+
+    rel(a, b, scale) = maximum(abs.(collect(a) .- collect(b))) / scale
+    force_err = rel(st_gpu.force, st_cpu.force, maximum(abs.(collect(st_cpu.force))))
+    vel_err = rel(st_gpu.ball.v, st_cpu.ball.v, 39.0)
+    ctl_err = rel(st_gpu.control, st_cpu.control, maximum(abs.(collect(st_cpu.control))))
+
+    tol = T === Float32 ? 1e-2 : 1e-9
+    ok = mean_err < tol && force_err < tol && vel_err < tol && ctl_err < tol
+    @printf("  %-8s coupled loop: mean %.2e, force %.2e, control %.2e, velocity %.2e  %s\n",
+            T, mean_err, force_err, ctl_err, vel_err, ok ? "OK" : "FAILED")
+    return ok
+end
+
 """Node updates per second, in millions, for the wall-bounded kernel."""
 function wall_mlups(::Type{T}, n::Int; radius = nothing, threads = 128,
                     target_seconds = 2.0) where {T}
@@ -191,6 +241,9 @@ function main()
     end
     for T in (Float64, Float32), rule in (:halfway, :interpolated_local)
         ok &= check_walls(T; rule = rule)
+    end
+    for T in (Float64, Float32)
+        ok &= check_coupling(T)
     end
     ok || error("correctness checks failed — do not trust the timings below")
     println()

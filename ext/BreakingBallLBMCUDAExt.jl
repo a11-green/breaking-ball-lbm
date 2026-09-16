@@ -98,14 +98,20 @@ writes the force and torque it hands the body into its own column of `contrib`.
 
 The reduction needs no atomics because the geometry already numbers the boundary
 nodes. `kind[i, j, k]` is that number, so column `b` belongs to exactly one
-thread and the totals are a plain sum afterwards. Each step *overwrites* the
-column rather than accumulating into it, which both saves a clearing pass and
-matches `aa_run_walls!`, whose return value is the final step's force.
+thread, in this step and in every other, and the totals are a plain sum
+afterwards.
+
+`Val{ACC}` picks what a step does to its column. `false` overwrites it, so the
+call reports the last step and needs no clearing pass; `true` adds to it, which
+is what the coupled loop wants — the momentum-exchange force on a body in
+turbulent flow fluctuates by more than the mean it is fluctuating about, so a
+single step is a poor sample to feed a trajectory. Accumulating is still
+race-free for the same reason overwriting is: one thread owns the column.
 """
 function aa_wall_kernel!(g, contrib, even::Bool, nx::Int, ny::Int, nz::Int, τ::T,
                          force::NTuple{3,T}, op::Val, ωb::T, ωh::T,
                          kind, deltas, center::NTuple{3,T}, spin::NTuple{3,T},
-                         halfway::Bool) where {T}
+                         halfway::Bool, ::Val{ACC}) where {T,ACC}
     idx = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
         t = Int(idx) - 1
@@ -117,12 +123,21 @@ function aa_wall_kernel!(g, contrib, even::Bool, nx::Int, ny::Int, nz::Int, τ::
                                        op, ωb, ωh, kind, deltas, center, spin, halfway)
         @inbounds b = kind[i, j, k]
         if b > Int32(0)
-            @inbounds contrib[1, b] = F[1]
-            @inbounds contrib[2, b] = F[2]
-            @inbounds contrib[3, b] = F[3]
-            @inbounds contrib[4, b] = M[1]
-            @inbounds contrib[5, b] = M[2]
-            @inbounds contrib[6, b] = M[3]
+            if ACC
+                @inbounds contrib[1, b] += F[1]
+                @inbounds contrib[2, b] += F[2]
+                @inbounds contrib[3, b] += F[3]
+                @inbounds contrib[4, b] += M[1]
+                @inbounds contrib[5, b] += M[2]
+                @inbounds contrib[6, b] += M[3]
+            else
+                @inbounds contrib[1, b] = F[1]
+                @inbounds contrib[2, b] = F[2]
+                @inbounds contrib[3, b] = F[3]
+                @inbounds contrib[4, b] = M[1]
+                @inbounds contrib[5, b] = M[2]
+                @inbounds contrib[6, b] = M[3]
+            end
         end
     end
     return nothing
@@ -139,12 +154,15 @@ function BreakingBallLBM.gpu_run_walls!(g::CuArray{T,4}, wall::BBL.WallField,
                                         spin::NTuple{3,<:Real} = (0, 0, 0),
                                         operator::Symbol = :central_moment,
                                         rule::Symbol = :interpolated_local,
+                                        reduction::Symbol = :last,
                                         omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
                                         threads::Int = 128) where {T}
     iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
     size(g, 4) == 27 || throw(ArgumentError("expected 27 cube slots, got $(size(g, 4))"))
     rule in (:interpolated_local, :halfway) ||
         throw(ArgumentError("rule must be :interpolated_local or :halfway, got $rule"))
+    reduction in (:last, :mean) ||
+        throw(ArgumentError("reduction must be :last or :mean, got $reduction"))
     size(contrib, 1) == 6 && size(contrib, 2) >= length(wall) ||
         throw(ArgumentError("contrib must be (6, $(length(wall))), got $(size(contrib))"))
 
@@ -156,16 +174,100 @@ function BreakingBallLBM.gpu_run_walls!(g::CuArray{T,4}, wall::BBL.WallField,
     halfway = rule === :halfway
     τT, ωbT, ωhT = T(τ), T(omega_bulk), T(omega_higher)
     center = T.(wall.center)
+    acc = Val(reduction === :mean)
+    reduction === :mean && fill!(contrib, zero(T))
 
     for step in 1:nsteps
         even = isodd(step)
         @cuda threads = threads blocks = blocks aa_wall_kernel!(
             g, contrib, even, nx, ny, nz, τT, F, op, ωbT, ωhT,
-            wall.kind, wall.deltas, center, ω, halfway)
+            wall.kind, wall.deltas, center, ω, halfway, acc)
     end
 
     total = Array(sum(contrib; dims = 2))
+    reduction === :mean && (total ./= nsteps)
     return (total[1], total[2], total[3]), (total[4], total[5], total[6])
+end
+
+"""
+A coupled run's device-side state: the wall geometry, the scratch its force
+reduction writes into, and the fluid mask the box-mean velocity needs.
+
+The mask is stored rather than derived per call because the mean is taken every
+sub-cycle and `kind` is `Int32`, so comparing it on the fly would mean either a
+type conversion inside the reduction or a second kernel.
+"""
+struct DeviceFlow{T<:AbstractFloat,W,C,M}
+    wall::W
+    contrib::C
+    fmask::M
+    nfluid::Int
+end
+
+"""
+    gpu_flow(wall)
+
+Move a [`WallField`](@ref) to the device along with everything the coupled loop
+needs alongside it.
+"""
+function BreakingBallLBM.gpu_flow(wall::BBL.WallField{T}) where {T}
+    dwall = BreakingBallLBM.gpu_wall(wall)
+    nb = max(length(wall), 1)
+    contrib = CUDA.zeros(T, 6, nb)
+    mask = T.(wall.kind .!= BBL.SOLID_NODE)
+    nfluid = count(!=(BBL.SOLID_NODE), wall.kind)
+    dmask = CuArray(mask)
+    return DeviceFlow{T,typeof(dwall),typeof(contrib),typeof(dmask)}(
+        dwall, contrib, dmask, nfluid)
+end
+
+BreakingBallLBM.flow_fluid_count(f::DeviceFlow) = f.nfluid
+
+function BreakingBallLBM.advance_flow!(g::CuArray{T,4}, f::DeviceFlow{T},
+                                       nsteps::Integer, τ::Real; kwargs...) where {T}
+    return BreakingBallLBM.gpu_run_walls!(g, f.wall, f.contrib, nsteps, τ;
+                                          reduction = :mean, kwargs...)
+end
+
+"""
+Mass-averaged density and velocity over the fluid nodes, on the device.
+
+Twenty-seven masked reductions, one per cube slot, because the momentum is a
+fixed linear combination of the slot sums: `ρu_α = Σ_s c_α(s) Σ_x g[x, s]`. Each
+reduction covers a twenty-seventh of the array, so the whole thing is a single
+pass over the populations — a fraction of a percent of a sub-cycle's work —
+without a hand-written block reduction to get wrong.
+
+The accumulator is `Float64` even for a Float32 solver, for the reason spelled
+out on `mean_fluid_velocity`: the controller acts on a difference that is a
+fraction of a percent of these sums, and single-precision rounding over tens of
+millions of nodes is of that same order.
+
+Valid only in the even-step layout, which is where `gpu_run_walls!` always
+leaves the state, since it insists on an even step count. The `force/2` term is
+Guo's definition of momentum, matching `mean_fluid_velocity` on the host.
+"""
+function BreakingBallLBM.flow_mean_velocity(g::CuArray{T,4}, f::DeviceFlow{T},
+                                            force::NTuple{3,<:Real}) where {T}
+    n = size(g, 1) * size(g, 2) * size(g, 3)
+    gr = reshape(g, n, 27)
+    mask = reshape(f.fmask, n)
+
+    ρ = 0.0; mx = 0.0; my = 0.0; mz = 0.0
+    for s in 1:27
+        cx, cy, cz = BBL.cube_velocity(s)
+        total = mapreduce((a, b) -> Float64(a) * Float64(b), +,
+                          view(gr, :, s), mask; init = 0.0)
+        ρ += total
+        cx != 0 && (mx += cx * total)
+        cy != 0 && (my += cy * total)
+        cz != 0 && (mz += cz * total)
+    end
+    ρ == 0 && return zero(T), (zero(T), zero(T), zero(T))
+    half = 0.5 * f.nfluid
+    return T(ρ / f.nfluid), (T((mx + half * Float64(force[1])) / ρ),
+                             T((my + half * Float64(force[2])) / ρ),
+                             T((mz + half * Float64(force[3])) / ρ))
 end
 
 end # module

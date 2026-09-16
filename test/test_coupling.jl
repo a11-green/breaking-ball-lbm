@@ -33,6 +33,55 @@
         @test fluid_node_count(wall) < prod(dims)
     end
 
+    @testset "the mean survives single precision" begin
+        # The controller acts on target − mean, which at a production grid is a
+        # fraction of a percent of the mean. Accumulating the sum in Float32
+        # would round away that much on its own, so the reduction is in double
+        # whatever the solver's precision — and a Float32 grid has to return the
+        # mean to far better than Float32 summation would manage.
+        u32 = LatticeUnits(Float32; nodes_per_diameter = 7, speed = 39.0,
+                           lattice_speed = 0.05, ν = 39.0 * 0.0748 / 40)
+        wall32 = build_wall_field(sphere_sdf_field(Float32, dims, R);
+                                  sdf_fn = sphere_sdf_fn(dims, R))
+        s32 = LBMState{Float32}(dims..., u32.τ; lattice = D3Q27())
+        init_equilibrium!(s32, (i, j, k) -> (1.0, -0.05, 0.0, 0.0))
+        g32 = to_cube_order!(similar(s32.f), s32.f)
+        _, ū32 = mean_fluid_velocity(g32, wall32)
+        @test ū32[1] ≈ -0.05f0 rtol = 1e-6
+        @test abs(ū32[2]) < 1e-8 && abs(ū32[3]) < 1e-8
+    end
+
+    @testset "the coupled loop barely notices single precision" begin
+        # Not a tolerance chosen to pass: if the loop were precision-sensitive
+        # the control signal would be the first thing to go, since it is a small
+        # difference of large sums.
+        function loop(::Type{S}, cycles) where {S}
+            un = LatticeUnits(S; nodes_per_diameter = 7, speed = 39.0,
+                              lattice_speed = 0.05, ν = 39.0 * 0.0748 / 40)
+            pr = BaseballProperties(S)
+            w = build_wall_field(sphere_sdf_field(S, dims, R);
+                                 sdf_fn = sphere_sdf_fn(dims, R))
+            ls = LBMState{S}(dims..., un.τ; lattice = D3Q27())
+            init_equilibrium!(ls, (i, j, k) -> (1.0, -0.05, 0.0, 0.0))
+            gg = to_cube_order!(similar(ls.f), ls.f)
+            stt = PitchState(BallState(S; position = (2.0, 0.0, 1.8),
+                                       velocity = (39.0, 0.0, 0.0),
+                                       spin = spin_from_rpm((0.0, 0.0, 1.0), 2708)))
+            rr = PitchRun(un, pr; substeps = 10, control_time = 200)
+            for _ in 1:cycles
+                couple_step!(gg, rr, stt, w)
+            end
+            return stt
+        end
+
+        a, b = loop(Float64, 6), loop(Float32, 6)
+        @test b.mean_velocity[1] ≈ a.mean_velocity[1] rtol = 1e-6
+        @test b.control[1] ≈ a.control[1] rtol = 1e-5
+        @test b.force[1] ≈ a.force[1] rtol = 1e-6
+        @test b.ball.v[1] ≈ a.ball.v[1] rtol = 1e-6
+        @test b.ball.v[2] ≈ a.ball.v[2] rtol = 1e-5
+    end
+
     @testset "force converts to lattice units and back" begin
         for F in (1.0, -4.78, 1e-3)
             @test to_physical_force(units, to_lattice_force(units, F)) ≈ F rtol = 1e-12

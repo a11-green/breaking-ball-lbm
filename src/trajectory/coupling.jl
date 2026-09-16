@@ -56,13 +56,21 @@ in its own 27 slots — which is where `aa_run_walls!` always leaves it, since i
 insists on an even step count. `force` is the body force that was applied, and
 it belongs here: the Guo scheme defines momentum as `Σ c f + F/2`, so leaving it
 out would bias the mean by half a step's worth of acceleration.
+
+**The accumulator is `Float64` whatever the solver's precision.** What the
+controller acts on is `target − mean`, and at a production grid that difference
+is around 0.03% of the mean itself — a small difference of two large sums. In
+Float32 over 3×10⁷ nodes the rounding of the sum alone is of that order, so a
+single-precision reduction would feed the controller as much noise as signal.
+Double accumulation costs nothing here: the pass is bound by reading the
+populations, not by adding them.
 """
 function mean_fluid_velocity(g::Array{T,4}, wall::WallField{T},
                              force::NTuple{3,<:Real} = (0, 0, 0)) where {T}
     nx, ny, nz = size(g, 1), size(g, 2), size(g, 3)
-    Fx, Fy, Fz = T(force[1]) / 2, T(force[2]) / 2, T(force[3]) / 2
-    ρtot = zero(T)
-    mx = zero(T); my = zero(T); mz = zero(T)
+    Fx, Fy, Fz = Float64(force[1]) / 2, Float64(force[2]) / 2, Float64(force[3]) / 2
+    ρtot = 0.0
+    mx = 0.0; my = 0.0; mz = 0.0
     nfluid = 0
     @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
         wall.kind[i, j, k] == SOLID_NODE && continue
@@ -77,15 +85,34 @@ function mean_fluid_velocity(g::Array{T,4}, wall::WallField{T},
             pz += T(cv_s[3]) * f_s
         end
         ρtot += ρ
-        mx += px + Fx; my += py + Fy; mz += pz + Fz
+        mx += Float64(px) + Fx; my += Float64(py) + Fy; mz += Float64(pz) + Fz
         nfluid += 1
     end
     nfluid == 0 && return zero(T), (zero(T), zero(T), zero(T))
-    return ρtot / nfluid, (mx / ρtot, my / ρtot, mz / ρtot)
+    return T(ρtot / nfluid), (T(mx / ρtot), T(my / ρtot), T(mz / ρtot))
 end
 
-"""Fluid node count — the volume the controller's momentum is spread over."""
-fluid_node_count(wall::WallField) = count(!=(SOLID_NODE), wall.kind)
+# --- backend interface -----------------------------------------------------
+#
+# The loop below touches the flow through exactly three operations, so a
+# backend is whatever answers them. On the host that is the `WallField` itself,
+# with no scratch; on the device it is a handle that also owns the per-boundary
+# contribution array and the fluid mask the reduction needs. Keeping the
+# interface this narrow is what lets `couple_step!` be one function rather than
+# two that have to be kept in agreement.
+
+"""How many nodes the controller's momentum is spread over."""
+flow_fluid_count(w::WallField) = count(!=(SOLID_NODE), w.kind)
+const fluid_node_count = flow_fluid_count
+
+"""Advance the flow one sub-cycle, returning the mean `(force, torque)`."""
+advance_flow!(g::Array{T,4}, w::WallField{T}, nsteps::Integer, τ::Real;
+              kwargs...) where {T} =
+    aa_run_walls!(g, w, nsteps, τ; reduction = :mean, kwargs...)
+
+"""Mass-averaged density and velocity over the fluid nodes."""
+flow_mean_velocity(g::Array{T,4}, w::WallField{T}, force::NTuple{3,<:Real}) where {T} =
+    mean_fluid_velocity(g, w, force)
 
 """
 Everything about a coupled run that does not change from sub-cycle to
@@ -142,7 +169,7 @@ function PitchState(ball::BallState{T}) where {T}
 end
 
 """
-    couple_step!(g, run, state, wall; frozen = false)
+    couple_step!(g, run, state, flow; frozen = false)
 
 One outer iteration. Returns the body force that was applied, in lattice units.
 
@@ -160,11 +187,11 @@ are the *same number*. Using the freshly measured force for the trajectory and
 last cycle's for the fluid would put the free stream and the inflow condition a
 sub-cycle out of step, which is the drift the whole scheme is built to avoid.
 """
-function couple_step!(g::Array{T,4}, run::PitchRun{T}, st::PitchState{T},
-                      wall::WallField{T}; frozen::Bool = false) where {T}
+function couple_step!(g::AbstractArray{T,4}, run::PitchRun{T}, st::PitchState{T},
+                      flow; frozen::Bool = false) where {T}
     u = run.units
     target = lattice_freestream(u, st.ball)
-    _, ū = mean_fluid_velocity(g, wall, st.control)
+    _, ū = flow_mean_velocity(g, flow, st.control)
     st.mean_velocity = ū
 
     # PI, critically damped at time constant `control_time`. The integral term
@@ -180,10 +207,9 @@ function couple_step!(g::Array{T,4}, run::PitchRun{T}, st::PitchState{T},
               lattice_body_force(u, sample_force, run.props; gravity = run.gravity)
     body = a_frame .+ st.control
 
-    F_lat, M_lat = aa_run_walls!(g, wall, run.substeps, u.τ;
+    F_lat, M_lat = advance_flow!(g, flow, run.substeps, u.τ;
                                  force = body, spin = lattice_spin(u, st.ball),
                                  operator = run.operator, rule = run.rule,
-                                 reduction = :mean,
                                  omega_bulk = run.omega_bulk,
                                  omega_higher = run.omega_higher)
 
@@ -204,7 +230,7 @@ function couple_step!(g::Array{T,4}, run::PitchRun{T}, st::PitchState{T},
 end
 
 """
-    couple_residual(run, state, wall)
+    couple_residual(run, state, flow)
 
 How far the loop is from closing on itself, as a dimensionless number.
 
@@ -220,8 +246,8 @@ Normalising the difference by the force gives a running check that the forcing,
 the boundary condition and the unit conversions all agree. It is not expected to
 vanish while the flow is still developing.
 """
-function couple_residual(run::PitchRun{T}, st::PitchState{T}, wall::WallField{T}) where {T}
-    supplied = st.control .* fluid_node_count(wall)      # lattice force, ρ = 1
+function couple_residual(run::PitchRun{T}, st::PitchState{T}, flow) where {T}
+    supplied = st.control .* flow_fluid_count(flow)      # lattice force, ρ = 1
     removed = to_lattice_force(run.units, st.force)
     scale = max(sqrt(sum(abs2, removed)), eps(T))
     return sqrt(sum(abs2, supplied .- removed)) / scale
@@ -233,34 +259,34 @@ to_lattice_force(u::LatticeUnits, F::NTuple{3,<:Real}) =
     (to_lattice_force(u, F[1]), to_lattice_force(u, F[2]), to_lattice_force(u, F[3]))
 
 """
-    spin_up!(g, run, state, wall; cycles)
+    spin_up!(g, run, state, flow; cycles)
 
 Develop the boundary layer with the trajectory frozen (§5). Returns the
 residual after the last cycle, which is the honest measure of whether the flow
 has settled enough to start integrating the trajectory.
 """
-function spin_up!(g::Array{T,4}, run::PitchRun{T}, st::PitchState{T},
-                  wall::WallField{T}; cycles::Integer = 10) where {T}
+function spin_up!(g::AbstractArray{T,4}, run::PitchRun{T}, st::PitchState{T},
+                  flow; cycles::Integer = 10) where {T}
     local res = T(Inf)
     for _ in 1:cycles
-        couple_step!(g, run, st, wall; frozen = true)
-        res = couple_residual(run, st, wall)
+        couple_step!(g, run, st, flow; frozen = true)
+        res = couple_residual(run, st, flow)
     end
     return res
 end
 
 """
-    fly!(g, run, state, wall; cycles, callback)
+    fly!(g, run, state, flow; cycles, callback)
 
 Run the coupled loop with the trajectory live. `callback(state)` is called after
 each sub-cycle and may return `false` to stop — which is how the caller ends the
 run at the plate, or rebuilds the wall geometry once
 [`orientation_drift`](@ref) says the seam has turned far enough to matter.
 """
-function fly!(g::Array{T,4}, run::PitchRun{T}, st::PitchState{T}, wall::WallField{T};
+function fly!(g::AbstractArray{T,4}, run::PitchRun{T}, st::PitchState{T}, flow;
               cycles::Integer = 100, callback = nothing) where {T}
     for _ in 1:cycles
-        couple_step!(g, run, st, wall)
+        couple_step!(g, run, st, flow)
         if callback !== nothing && callback(st) === false
             return st
         end

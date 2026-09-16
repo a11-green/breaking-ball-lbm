@@ -45,7 +45,7 @@ export LBMState, Lattice, D3Q19, D3Q27,
     collide!, collide_central_moments!, stream!, step!, run!, fluid_velocity,
     cube_velocity, cube_opposite, cube_weight, cube_equilibrium,
     to_cube_order!, from_cube_order!, aa_gather!, aa_scatter!, collide_buffer!,
-    aa_step_node!, aa_run!, gpu_run!, gpu_run_walls!, gpu_wall,
+    aa_step_node!, aa_run!, gpu_run!, gpu_run_walls!, gpu_wall, gpu_flow,
     gpu_copy_bandwidth, gpu_backend_loaded,
     Smagorinsky, total_relaxation_time, eddy_viscosity, nonequilibrium_flux_norm,
     strain_rate_magnitude,
@@ -73,6 +73,7 @@ export LBMState, Lattice, D3Q19, D3Q27,
     PLATE_DISTANCE, PFX_SEGMENT, simulate_trajectory, state_at_distance,
     PitchMetrics, pitch_metrics, inches,
     mean_fluid_velocity, fluid_node_count, to_lattice_force,
+    flow_fluid_count, advance_flow!, flow_mean_velocity,
     PitchRun, PitchState, couple_step!, couple_residual, spin_up!, fly!
 
 """
@@ -107,6 +108,15 @@ function gpu_run_walls! end
 Copy a [`WallField`](@ref) to the device.
 """
 function gpu_wall end
+
+"""
+    gpu_flow(wall)
+
+Device-side state for a coupled run: the wall geometry, the force-reduction
+scratch and the fluid mask. Pass the result to [`couple_step!`](@ref) in place
+of a host `WallField`.
+"""
+function gpu_flow end
 
 """Whether the CUDA extension has been loaded."""
 gpu_backend_loaded() = !isnothing(Base.get_extension(@__MODULE__, :BreakingBallLBMCUDAExt))
