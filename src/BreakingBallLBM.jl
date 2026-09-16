@@ -21,6 +21,7 @@ include("core/streaming.jl")
 include("turbulence/smagorinsky.jl")
 include("boundary/links.jl")
 include("boundary/bounceback.jl")
+include("boundary/aa_walls.jl")
 include("geometry/seam.jl")
 include("geometry/sdf.jl")
 include("validation/taylor_green.jl")
@@ -37,11 +38,13 @@ export LBMState, Lattice, D3Q19, D3Q27,
     collide!, collide_central_moments!, stream!, step!, run!, fluid_velocity,
     cube_velocity, cube_opposite, cube_weight, cube_equilibrium,
     to_cube_order!, from_cube_order!, aa_gather!, aa_scatter!, collide_buffer!,
-    aa_step_node!, aa_run!, gpu_run!, gpu_copy_bandwidth, gpu_backend_loaded,
+    aa_step_node!, aa_run!, gpu_run!, gpu_run_walls!, gpu_wall,
+    gpu_copy_bandwidth, gpu_backend_loaded,
     Smagorinsky, total_relaxation_time, eddy_viscosity, nonequilibrium_flux_norm,
     strain_rate_magnitude,
     BounceBackLinks, build_links, solid_mask, refine_delta,
     bounce_back_values!, apply_bounce_back!, init_solid!,
+    WallField, build_wall_field, aa_scatter_walls!, aa_step_node_walls!, aa_run_walls!,
     BaseballSeam, seam_point, seam_polyline, seam_length,
     BaseballGeometry, sdf, sphere_sdf, sdf_field, sdf_field!, solid_volume,
     TaylorGreen, PoiseuilleChannel, poiseuille_velocity, poiseuille_peak, channel_sdf,
@@ -64,6 +67,22 @@ not a safe stand-in — the same card ships with two memory types — so the
 benchmark measures the ceiling it is about to compare against.
 """
 function gpu_copy_bandwidth end
+
+"""
+    gpu_run_walls!(g, wall, contrib, nsteps, τ; kwargs...)
+
+Advance a wall-bounded AA-pattern state on the device, returning the
+`(force, torque)` of the final step. `wall` must hold device arrays (see
+[`gpu_wall`](@ref)) and `contrib` is scratch of size `(6, length(wall))`.
+"""
+function gpu_run_walls! end
+
+"""
+    gpu_wall(wall)
+
+Copy a [`WallField`](@ref) to the device.
+"""
+function gpu_wall end
 
 """Whether the CUDA extension has been loaded."""
 gpu_backend_loaded() = !isnothing(Base.get_extension(@__MODULE__, :BreakingBallLBMCUDAExt))

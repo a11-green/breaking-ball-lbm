@@ -72,7 +72,9 @@ Second-order (low-Mach) Maxwell-Boltzmann equilibrium for direction `q`.
 @inline function equilibrium(lat::Lattice, q::Integer, ρ::T, ux::T, uy::T, uz::T) where {T<:AbstractFloat}
     cu = T(cxs(lat)[q]) * ux + T(cys(lat)[q]) * uy + T(czs(lat)[q]) * uz
     usq = ux * ux + uy * uy + uz * uz
-    return T(weights(lat)[q]) * ρ * (one(T) + cu / T(CS2) + cu * cu / (2 * T(CS2)^2) - usq / (2 * T(CS2)))
+    # Exact reciprocals of c_s²: dividing costs a real division (see aa_pattern.jl).
+    return T(weights(lat)[q]) * ρ *
+           (one(T) - T(1.5) * usq + T(3) * cu + T(4.5) * cu * cu)
 end
 
 """

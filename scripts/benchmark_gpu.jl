@@ -85,6 +85,74 @@ function check_physics(::Type{T}; n = 32, steps = 200, operator = :central_momen
     return ok
 end
 
+"""Does the wall path reproduce the CPU reference, forces included?"""
+function check_walls(::Type{T}; n = 20, radius = 5.0, steps = 6,
+                     operator = :central_moment, rule = :interpolated_local) where {T}
+    dims = (n, n, n)
+    τ = T(0.8)
+    ϕ = sphere_sdf_field(T, dims, radius)
+    wall = build_wall_field(ϕ; sdf_fn = sphere_sdf_fn(dims, radius))
+
+    s = LBMState{T}(dims..., τ; lattice = D3Q27())
+    init_equilibrium!(s, (i, j, k) -> (1.0 + 0.002sin(i + 2j), 0.01cos(i), -0.008sin(j), 0.0))
+    g_cpu = to_cube_order!(similar(s.f), s.f)
+    g_gpu = CuArray(copy(g_cpu))
+
+    force = (T(2e-5), T(0), T(0))
+    spin = (T(0), T(0), T(1.5e-3))
+
+    Fcpu, Tcpu = aa_run_walls!(g_cpu, wall, steps, τ; force = force, spin = spin,
+                               operator = operator, rule = rule)
+
+    dwall = gpu_wall(wall)
+    contrib = CUDA.zeros(T, 6, length(wall))
+    Fgpu, Tgpu = gpu_run_walls!(g_gpu, dwall, contrib, steps, τ; force = force,
+                                spin = spin, operator = operator, rule = rule)
+
+    solid = solid_mask(ϕ)
+    got = Array(g_gpu)
+    ferr = 0.0
+    scale = 0.0
+    for k in 1:n, j in 1:n, i in 1:n, q in 1:27
+        solid[i, j, k] && continue
+        ferr = max(ferr, abs(got[i, j, k, q] - g_cpu[i, j, k, q]))
+        scale = max(scale, abs(g_cpu[i, j, k, q]))
+    end
+    rel = ferr / scale
+    force_err = maximum(abs.(collect(Fgpu) .- collect(Fcpu))) / maximum(abs.(collect(Fcpu)))
+    torque_err = maximum(abs.(collect(Tgpu) .- collect(Tcpu))) / maximum(abs.(collect(Tcpu)))
+
+    tol = T === Float32 ? 1e-3 : 1e-10
+    ok = rel < tol && force_err < tol && torque_err < tol
+    @printf("  %-8s %-16s populations %.2e, force %.2e, torque %.2e  %s\n",
+            T, rule, rel, force_err, torque_err, ok ? "OK" : "FAILED")
+    return ok
+end
+
+"""Node updates per second, in millions, for the wall-bounded kernel."""
+function wall_mlups(::Type{T}, n::Int; radius = nothing, threads = 128,
+                    target_seconds = 2.0) where {T}
+    r = radius === nothing ? n / 8 : radius
+    dims = (n, n, n)
+    ϕ = sphere_sdf_field(T, dims, r)
+    wall = build_wall_field(ϕ)
+    s = LBMState{T}(dims..., 0.8; lattice = D3Q27())
+    init_equilibrium!(s, (i, j, k) -> (1.0, 0.0, 0.0, 0.0))
+    d_g = CuArray(to_cube_order!(similar(s.f), s.f))
+    dwall = gpu_wall(wall)
+    contrib = CUDA.zeros(T, 6, max(length(wall), 1))
+
+    gpu_run_walls!(d_g, dwall, contrib, 2, 0.8; threads = threads)
+    CUDA.synchronize()
+    steps = 20
+    while true
+        t = CUDA.@elapsed gpu_run_walls!(d_g, dwall, contrib, steps, 0.8; threads = threads)
+        t > target_seconds / 4 && return n^3 * steps / t / 1e6
+        steps *= 4
+        steps > 100_000 && return n^3 * steps / t / 1e6
+    end
+end
+
 """Node updates per second, in millions."""
 function mlups(::Type{T}, n::Int, operator::Symbol; target_seconds = 2.0,
                threads = 128) where {T}
@@ -121,6 +189,9 @@ function main()
     for T in (Float64, Float32)
         ok &= check_physics(T; operator = :central_moment)
     end
+    for T in (Float64, Float32), rule in (:halfway, :interpolated_local)
+        ok &= check_walls(T; rule = rule)
+    end
     ok || error("correctness checks failed — do not trust the timings below")
     println()
 
@@ -142,6 +213,19 @@ function main()
                     T, operator, n, m, roof, 100 * m / roof)
         catch err
             @printf("%-9s %-16s %-6d skipped (%s)\n", T, operator, n,
+                    first(split(sprint(showerror, err), '\n')))
+        end
+        flush(stdout)
+    end
+    println()
+
+    println("Wall-bounded kernel (sphere of radius n/8)")
+    @printf("%-9s %-6s %-12s\n", "precision", "n", "MLUPS")
+    for T in (Float32, Float64), n in (64, 128, 192)
+        try
+            @printf("%-9s %-6d %-12.1f\n", T, n, wall_mlups(T, n))
+        catch err
+            @printf("%-9s %-6d skipped (%s)\n", T, n,
                     first(split(sprint(showerror, err), '\n')))
         end
         flush(stdout)

@@ -5,8 +5,11 @@ Two rules are available:
 
   * `:halfway` — plain bounce-back, which places the wall midway along every
     link regardless of where it actually is;
-  * `:interpolated` — Bouzidi's linear rule, which honours the wall fraction δ
-    and is the one the production runs use.
+  * `:interpolated` — Bouzidi's linear rule, which honours the wall fraction δ;
+  * `:interpolated_local` — the same, except that links with `δ < 1/2` fall back
+    to halfway rather than reaching for the next fluid node out. A fused kernel
+    has only its own node's post-collision populations, so this is what the GPU
+    path can implement, and having it here lets the two be compared exactly.
 
 The force follows the momentum-exchange method: a population arriving at the
 wall carries `c_q f̃_q` towards it and leaves carrying `-c_q f_q̄`, so the wall
@@ -28,8 +31,9 @@ function bounce_back_values!(vals::Vector{T}, s::LBMState{T}, links::BounceBackL
                              spin::NTuple{3,<:Real} = (0, 0, 0)) where {T}
     length(vals) == length(links) ||
         throw(DimensionMismatch("vals has length $(length(vals)), links has $(length(links))"))
-    rule in (:interpolated, :halfway) ||
-        throw(ArgumentError("rule must be :interpolated or :halfway, got $rule"))
+    rule in (:interpolated, :interpolated_local, :halfway) ||
+        throw(ArgumentError("rule must be :interpolated, :interpolated_local or " *
+                            ":halfway, got $rule"))
 
     lat = s.lattice
     f = s.f
@@ -58,7 +62,10 @@ function bounce_back_values!(vals::Vector{T}, s::LBMState{T}, links::BounceBackL
         wall = 2 * T(weights(lat)[q]) * ρw * (cx * uwx + cy * uwy + cz * uwz) / T(CS2)
 
         fq = f[i, j, k, q]
-        if rule === :halfway || (δ < 1 // 2 && !links.second_fluid[n])
+        # :interpolated_local never reaches for the second fluid node, so it matches
+        # what a fused GPU kernel can do from one node's own populations.
+        local_only = rule === :interpolated_local
+        if rule === :halfway || (δ < 1 // 2 && (local_only || !links.second_fluid[n]))
             val = fq - wall
         elseif δ < 1 // 2
             ib = mod1(i - cxs(lat)[q], nx)
@@ -116,15 +123,16 @@ end
 
 """
     step!(s, links, vals; force = nothing, solid = nothing, les = nothing,
-          rule = :interpolated, spin = (0, 0, 0))
+          operator = :bgk, rule = :interpolated, spin = (0, 0, 0))
 
 One time step with a wall: collide, bounce back, stream, apply. Returns the
 `(force, torque)` transferred to the wall during this step.
 """
 function step!(s::LBMState{T}, links::BounceBackLinks{T}, vals::Vector{T};
                force = nothing, solid = nothing, les = nothing,
+               operator::Symbol = :bgk,
                rule::Symbol = :interpolated, spin::NTuple{3,<:Real} = (0, 0, 0)) where {T}
-    collide!(s; force = force, solid = solid, les = les)
+    collide!(s; force = force, solid = solid, les = les, operator = operator)
     F, τq = bounce_back_values!(vals, s, links; rule = rule, spin = spin)
     stream!(s)
     apply_bounce_back!(s, links, vals)
