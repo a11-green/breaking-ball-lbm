@@ -26,6 +26,12 @@ include("geometry/seam.jl")
 include("geometry/sdf.jl")
 include("validation/taylor_green.jl")
 include("validation/poiseuille.jl")
+include("trajectory/quaternion.jl")
+include("trajectory/units.jl")
+include("trajectory/body.jl")
+include("trajectory/frame.jl")
+include("trajectory/aero_model.jl")
+include("trajectory/trajectory.jl")
 include("validation/sphere_array.jl")
 
 export LBMState, Lattice, D3Q19, D3Q27,
@@ -49,7 +55,22 @@ export LBMState, Lattice, D3Q19, D3Q27,
     BaseballGeometry, sdf, sphere_sdf, sdf_field, sdf_field!, solid_volume,
     TaylorGreen, PoiseuilleChannel, poiseuille_velocity, poiseuille_peak, channel_sdf,
     sphere_sdf_field, sphere_sdf_fn, exact_sphere_delta,
-    hasimoto_factor, stokes_drag, superficial_velocity
+    hasimoto_factor, stokes_drag, superficial_velocity,
+    Quat, quat_from_axis_angle, rotate, unrotate, quat_rate, rotation_matrix,
+    LatticeUnits, mach_number, lattice_reynolds, resolution_report,
+    to_lattice_length, to_lattice_velocity, to_lattice_acceleration,
+    to_lattice_rate, to_lattice_steps,
+    to_physical_length, to_physical_velocity, to_physical_time,
+    to_physical_force, to_physical_torque,
+    AIR_DENSITY, AIR_VISCOSITY, GRAVITY,
+    BallProperties, BaseballProperties, BallState, advance, ball_rates,
+    spin_from_rpm, spin_rpm, speed, spin_parameter, transverse_spin,
+    frame_acceleration, fluid_body_acceleration, freestream_velocity,
+    lattice_body_force, lattice_freestream, lattice_spin,
+    seam_orientation, orientation_drift,
+    CoefficientAero, BallisticAero, no_magnus,
+    PLATE_DISTANCE, PFX_SEGMENT, simulate_trajectory, state_at_distance,
+    PitchMetrics, pitch_metrics, inches
 
 """
     gpu_run!(g, nsteps, τ; force, operator, omega_bulk, omega_higher)

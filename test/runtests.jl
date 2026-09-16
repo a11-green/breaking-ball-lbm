@@ -13,4 +13,5 @@ const BBL = BreakingBallLBM
     include("test_aa_walls.jl")
     include("test_turbulence.jl")
     include("test_taylor_green.jl")
+    include("test_trajectory.jl")
 end
