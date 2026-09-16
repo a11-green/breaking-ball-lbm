@@ -107,6 +107,25 @@
         @test worst < 1e-9                       # the columns are numbered differently,
     end                                          # the wall fractions are not
 
+    @testset "wall fractions carry the bisection's resolution and no more" begin
+        # Each δ is a bisection result, so it is only defined to 2^-iterations.
+        # This is worth pinning down because it sets what any *other*
+        # implementation of the same cut — the CUDA kernel, say — can be asked
+        # to match: last-bit differences in sin and cos flip the final
+        # comparison, and the two answers then differ by exactly one bin. That
+        # is agreement to the algorithm's full precision, not a discrepancy.
+        q = quat_from_axis_angle((0.0, 0.0, 1.0), 0.37)
+        recut!(rw, q; iterations = 20)
+        coarse = copy(rw.wall.deltas)
+        recut!(rw, q; iterations = 34)
+        fine = copy(rw.wall.deltas)
+
+        worst = maximum(abs.(coarse .- fine))
+        @test worst <= 2.0^-20
+        @test worst > 2.0^-34        # the bin is real, not a formality
+        @test count(!=(0.0), coarse .- fine) > 10
+    end
+
     @testset "a smooth sphere cannot notice being turned" begin
         smooth = BaseballGeometry(; seam_height = 0.0)
         sw = RotatingWall(smooth, dims, dx)

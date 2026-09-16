@@ -185,9 +185,20 @@ Does the device re-cut the seam the way the host does?
 The re-cut is the one piece where host and device run genuinely different code —
 two kernel launches against a pair of loops — so this compares the whole result:
 which nodes came out solid, every wall fraction, how many nodes were refilled,
-and the populations they were refilled with.
+what they were refilled with, and finally the force a short run produces.
+
+**Wall fractions cannot be expected to match to round-off, and it would be wrong
+to ask.** Each δ is the output of a bisection, so it carries the resolution of
+that bisection and no more: `2^-iterations`, or 9.5e-7 at the default depth of
+twenty. Host and device evaluate `sin`, `cos` and `atan` with different last
+bits, and near the root the distance being tested is nearly zero, so the final
+comparison can fall either way. When it does, the two answers differ by exactly
+one bin — which is agreement to the full precision the algorithm has, not a
+discrepancy. The tolerance below is therefore counted in bins, and the force
+check that follows is what says the agreement is good enough to matter.
 """
-function check_recut(::Type{T}; N = 20, cycles = 6, dims = (44, 44, 44)) where {T}
+function check_recut(::Type{T}; N = 20, cycles = 6, dims = (44, 44, 44),
+                     iterations = 20) where {T}
     geom = BaseballGeometry(; diameter = T(0.0748), seam_height = T(0.00079),
                             seam_amplitude = T(0.7))
     dx = geom.radius * 2 / N
@@ -202,24 +213,46 @@ function check_recut(::Type{T}; N = 20, cycles = 6, dims = (44, 44, 44)) where {
 
     kind_diff = 0
     worst_δ = 0.0
+    far = 0
     fresh_h = 0
     fresh_d = 0
     for m in 1:cycles
         q = quat_from_axis_angle((T(0), T(0), T(1)), T(0.12) * m)
-        fresh_h += recut!(host, q, gh, spin)
-        fresh_d += recut!(dev, q, gd, spin)
+        fresh_h += recut!(host, q, gh, spin; iterations = iterations)
+        fresh_d += recut!(dev, q, gd, spin; iterations = iterations)
         kind_diff += count(Array(dev.flow.wall.kind) .!= host.wall.kind)
-        worst_δ = max(worst_δ, maximum(abs.(Array(dev.flow.wall.deltas) .- host.wall.deltas)))
+        d = abs.(Array(dev.flow.wall.deltas) .- host.wall.deltas)
+        worst_δ = max(worst_δ, maximum(d))
+        far += count(>(2.0^-iterations * 2), d)
     end
 
     pop_err = maximum(abs.(Array(gd) .- gh))
-    tol = T === Float32 ? 1e-4 : 1e-11
+
+    # What the wall fractions are for: run the flow against them and compare the
+    # force. A δ difference that mattered would show here as something far
+    # larger than the precision of the populations themselves.
+    Fh, Mh = aa_run_walls!(gh, host.wall, 20, T(0.55); spin = spin, reduction = :mean)
+    Fd, Md = gpu_run_walls!(gd, dev.flow.wall, dev.flow.contrib, 20, T(0.55);
+                            spin = spin, reduction = :mean)
+    fscale = maximum(abs.(collect(Fh)))
+    force_err = maximum(abs.(collect(Fd) .- collect(Fh))) / fscale
+    torque_err = maximum(abs.(collect(Md) .- collect(Mh))) / max(maximum(abs.(collect(Mh))), eps(T))
+
+    bins = worst_δ * 2.0^iterations
+    # The refill is exact arithmetic on an equilibrium, so it is held to
+    # round-off. The force is not: a bisection bin of δ propagates through
+    # Bouzidi's rule into every link it touches, so the honest bar there is
+    # "far smaller than anything that would matter", not "round-off".
+    pop_tol = T === Float32 ? 1e-4 : 1e-9
+    force_tol = T === Float32 ? 1e-2 : 1e-4
     # fresh_h > 0 matters: with no node flips the refill path is not tested at
     # all, and the comparison would pass by doing nothing.
-    ok = kind_diff == 0 && worst_δ < tol && fresh_d == fresh_h && fresh_h > 0 &&
-         dev.nfluid == host.nfluid && pop_err < tol
-    @printf("  %-8s re-cut: kind %d differ, delta %.2e, refilled %d/%d, populations %.2e  %s\n",
-            T, kind_diff, worst_δ, fresh_d, fresh_h, pop_err, ok ? "OK" : "FAILED")
+    ok = kind_diff == 0 && bins < 16 && far == 0 && fresh_d == fresh_h && fresh_h > 0 &&
+         dev.nfluid == host.nfluid && pop_err < pop_tol &&
+         force_err < force_tol && torque_err < force_tol
+    @printf("  %-8s re-cut: kind %d, delta %.1f bins (%d far), refilled %d/%d, force %.2e, torque %.2e  %s\n",
+            T, kind_diff, bins, far, fresh_d, fresh_h, force_err, torque_err,
+            ok ? "OK" : "FAILED")
     return ok
 end
 

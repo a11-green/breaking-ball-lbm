@@ -289,8 +289,8 @@ function recut!(rw::RotatingWall{T}, q::Quat{T}; iterations::Integer = 20) where
 end
 
 function recut!(rw::RotatingWall{T}, q::Quat{T}, g::Array{T,4},
-                spin::NTuple{3,<:Real}) where {T}
-    recut!(rw, q)
+                spin::NTuple{3,<:Real}; iterations::Integer = 20) where {T}
+    recut!(rw, q; iterations = iterations)
     return refill_fresh!(g, rw, spin)
 end
 
