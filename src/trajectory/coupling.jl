@@ -121,12 +121,19 @@ sub-cycle.
 `control_time` is the controller's time constant, in lattice steps. It has to be
 long compared with a sub-cycle and with the time the box takes to convect its
 own length, or the controller chases turbulence instead of correcting drift.
+
+`recut_drift` is how far the ball's surface may turn, in lattice spacings at the
+equator, before the seam geometry is re-cut. It is checked once per sub-cycle,
+so the sub-cycle has to be short enough that the surface does not outrun the
+threshold within one — see [`max_substeps`](@ref). With a static geometry it has
+no effect.
 """
 struct PitchRun{T<:AbstractFloat}
     units::LatticeUnits{T}
     props::BallProperties{T}
     substeps::Int
     control_time::T
+    recut_drift::T
     operator::Symbol
     rule::Symbol
     omega_bulk::T
@@ -136,7 +143,7 @@ end
 
 function PitchRun(units::LatticeUnits{T}, props::BallProperties{T};
                   substeps::Integer = 100, control_time::Real = 20 * substeps,
-                  operator::Symbol = :central_moment,
+                  recut_drift::Real = 0.25, operator::Symbol = :central_moment,
                   rule::Symbol = :interpolated_local,
                   omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
                   gravity::NTuple{3,<:Real} = GRAVITY) where {T}
@@ -144,8 +151,8 @@ function PitchRun(units::LatticeUnits{T}, props::BallProperties{T};
         throw(ArgumentError("substeps must be even, got $substeps"))
     control_time > substeps ||
         throw(ArgumentError("control_time ($control_time) must exceed substeps ($substeps)"))
-    return PitchRun{T}(units, props, Int(substeps), T(control_time), operator, rule,
-                       T(omega_bulk), T(omega_higher), T.(gravity))
+    return PitchRun{T}(units, props, Int(substeps), T(control_time), T(recut_drift),
+                       operator, rule, T(omega_bulk), T(omega_higher), T.(gravity))
 end
 
 """
@@ -159,13 +166,14 @@ mutable struct PitchState{T<:AbstractFloat}
     force::NTuple{3,T}          # N, most recent sub-cycle average
     torque::NTuple{3,T}         # N·m
     mean_velocity::NTuple{3,T}  # lattice units, measured
+    fresh::Int                  # nodes the last re-cut uncovered
     steps::Int
     released::Quat{T}           # orientation when the wall geometry was last built
 end
 
 function PitchState(ball::BallState{T}) where {T}
     z = (zero(T), zero(T), zero(T))
-    return PitchState{T}(ball, z, z, z, z, z, 0, ball.q)
+    return PitchState{T}(ball, z, z, z, z, z, 0, 0, ball.q)
 end
 
 """
@@ -202,13 +210,18 @@ function couple_step!(g::AbstractArray{T,4}, run::PitchRun{T}, st::PitchState{T}
     st.integral = st.integral .+ e .* run.substeps
     st.control = (2 / Tc) .* e .+ (1 / Tc^2) .* st.integral
 
+    # The seam has to be where the ball is pointing before the sub-cycle runs,
+    # not after: these are the δ values the bounce-back is about to use.
+    spin_lat = lattice_spin(u, st.ball)
+    st.fresh = maybe_recut!(g, flow, st.ball.q, spin_lat, run.recut_drift)
+
     sample_force, sample_torque = st.force, st.torque
     a_frame = frozen ? (zero(T), zero(T), zero(T)) :
               lattice_body_force(u, sample_force, run.props; gravity = run.gravity)
     body = a_frame .+ st.control
 
     F_lat, M_lat = advance_flow!(g, flow, run.substeps, u.τ;
-                                 force = body, spin = lattice_spin(u, st.ball),
+                                 force = body, spin = spin_lat,
                                  operator = run.operator, rule = run.rule,
                                  omega_bulk = run.omega_bulk,
                                  omega_higher = run.omega_higher)

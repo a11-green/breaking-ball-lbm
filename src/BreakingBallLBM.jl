@@ -12,6 +12,7 @@ geometry of the ball.
 """
 module BreakingBallLBM
 
+include("trajectory/quaternion.jl")
 include("core/lattice.jl")
 include("core/state.jl")
 include("core/collision.jl")
@@ -24,9 +25,9 @@ include("boundary/bounceback.jl")
 include("boundary/aa_walls.jl")
 include("geometry/seam.jl")
 include("geometry/sdf.jl")
+include("geometry/rotating.jl")
 include("validation/taylor_green.jl")
 include("validation/poiseuille.jl")
-include("trajectory/quaternion.jl")
 include("trajectory/units.jl")
 include("trajectory/body.jl")
 include("trajectory/frame.jl")
@@ -52,8 +53,10 @@ export LBMState, Lattice, D3Q19, D3Q27,
     BounceBackLinks, build_links, solid_mask, refine_delta,
     bounce_back_values!, apply_bounce_back!, init_solid!,
     WallField, build_wall_field, aa_scatter_walls!, aa_step_node_walls!, aa_run_walls!,
-    BaseballSeam, seam_point, seam_polyline, seam_length,
-    BaseballGeometry, sdf, sphere_sdf, sdf_field, sdf_field!, solid_volume,
+    BaseballSeam, seam_point, seam_polyline, seam_length, seam_distance,
+    BaseballGeometry, sdf, sdf_exhaustive, sphere_sdf, sdf_field, sdf_field!, solid_volume,
+    RotatingWall, recut!, refill_fresh!, body_sdf, shell_is_sufficient,
+    maybe_recut!, surface_drift_per_step, max_substeps,
     TaylorGreen, PoiseuilleChannel, poiseuille_velocity, poiseuille_peak, channel_sdf,
     sphere_sdf_field, sphere_sdf_fn, exact_sphere_delta,
     hasimoto_factor, stokes_drag, superficial_velocity,

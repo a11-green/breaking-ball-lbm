@@ -222,4 +222,58 @@
         fly!(g, run, st, wall; cycles = 100, callback = _ -> (n += 1) < 3)
         @test n == 3
     end
+
+    @testset "flying with a seam that turns" begin
+        # End to end: a seamed ball whose geometry is re-cut as it spins, driven
+        # by the same loop. What this checks is that the pieces fit — the re-cut
+        # fires on the right schedule, the refill leaves a usable flow, and the
+        # trajectory still behaves.
+        geom = BaseballGeometry()
+        N = 10
+        rdims = (24, 24, 24)
+        rdx = geom.radius * 2 / N
+        runits = LatticeUnits(; nodes_per_diameter = N, speed = 39.0,
+                              lattice_speed = 0.05, ν = 39.0 * 0.0748 / 60)
+        rw = RotatingWall(geom, rdims, rdx)
+
+        ball = BallState(; position = (2.0, 0.0, 1.8), velocity = (39.0, 0.0, 0.0),
+                         spin = spin_from_rpm((0.0, 0.0, 1.0), 2708))
+        spin_lat = lattice_spin(runits, ball)
+
+        # Size the sub-cycle from the geometry, not by guessing.
+        nsub = max_substeps(rw, spin_lat, 0.25)
+        @test iseven(nsub) && nsub >= 2
+        @test surface_drift_per_step(rw, spin_lat) * nsub <= 0.25
+
+        rrun = PitchRun(runits, BaseballProperties(); substeps = nsub,
+                        control_time = 40 * nsub, recut_drift = 0.25)
+        rs = LBMState{T}(rdims..., runits.τ; lattice = D3Q27())
+        init_equilibrium!(rs, (i, j, k) -> (1.0, -0.05, 0.0, 0.0))
+        rg = to_cube_order!(similar(rs.f), rs.f)
+        st = PitchState(ball)
+
+        cuts0 = rw.recuts
+        for _ in 1:14
+            couple_step!(rg, rrun, st, rw)
+        end
+
+        @test rw.recuts > cuts0                     # the seam did move
+        @test all(isfinite, rg)
+        @test st.ball.v[1] < 39.0                   # drag
+        @test st.ball.v[3] < 0                      # gravity
+        @test abs(st.mean_velocity[1] + 0.05) < 0.02
+        @test isfinite(couple_residual(rrun, st, rw))
+
+        # The fluid node count has to track the re-cuts, or the controller is
+        # spreading its momentum over the wrong volume.
+        @test flow_fluid_count(rw) == count(!=(BBL.SOLID_NODE), rw.wall.kind)
+
+        # Densities stay sane: a refill that left AA scratch behind shows here.
+        worst = 0.0
+        for k in 1:rdims[3], j in 1:rdims[2], i in 1:rdims[1]
+            rw.wall.kind[i, j, k] == BBL.SOLID_NODE && continue
+            worst = max(worst, abs(sum(rg[i, j, k, q] for q in 1:27) - 1))
+        end
+        @test worst < 0.05
+    end
 end

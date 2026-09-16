@@ -45,8 +45,21 @@ end
     sdf(geom, p)
 
 Signed distance from `p` (ball-fixed frame, metres) to the seamed ball.
+
+The seam term comes from [`seam_distance`](@ref), which searches a window of the
+curve parameter seeded by the azimuth rather than walking the polyline. That is
+what makes re-cutting the geometry as the ball turns affordable at all
+(`geometry/rotating.jl`); [`sdf_exhaustive`](@ref) keeps the polyline version as
+the reference the fast one is tested against.
 """
 function sdf(geom::BaseballGeometry{T}, p::NTuple{3,T}) where {T}
+    ds = sphere_sdf(geom, p)
+    geom.seam_height > 0 || return ds
+    return min(ds, seam_distance(geom.seam, p) - geom.seam_height)
+end
+
+"""The same distance from the sampled polyline, walked in full — the reference."""
+function sdf_exhaustive(geom::BaseballGeometry{T}, p::NTuple{3,T}) where {T}
     ds = sphere_sdf(geom, p)
     geom.seam_height > 0 || return ds
     return min(ds, distance_to_seam(p, geom.polyline) - geom.seam_height)

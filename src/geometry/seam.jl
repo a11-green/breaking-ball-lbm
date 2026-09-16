@@ -113,3 +113,77 @@ function distance_to_seam(p::NTuple{3,T}, polyline::Vector{NTuple{3,T}}) where {
     end
     return d
 end
+
+"""
+    seam_distance(seam, p; window, scan, iterations)
+
+Distance from `p` to the seam curve, found by searching a window of the curve
+parameter rather than walking the whole polyline.
+
+**Why this exists.** `distance_to_seam` costs one segment evaluation per
+polyline sample — two thousand of them — and the geometry has to be re-cut every
+dozen or so steps as the ball turns (`geometry/rotating.jl`). At that rate the
+exhaustive search costs more than the flow solver by an order of magnitude, so it
+stops being a reference implementation and starts being the reason the run is
+impossible.
+
+**Why a window is enough.** The parameterisation is `φ = u`: the curve passes
+through every azimuth exactly once, so the azimuth of the query point is a seed
+for the parameter of its nearest curve point, and points at a different azimuth
+`Δφ` away are at least `R√(1−A²)·Δφ` distant — for the default amplitude, seven
+tenths of a radius per radian. A window of ±0.6 rad therefore cannot exclude the
+true nearest point unless that point is already many ridge heights away, in
+which case the answer is "outside the seam" either way.
+
+That is an argument, not a proof, so `test/test_geometry.jl` checks it: over
+random points near the surface the windowed search agrees with the exhaustive
+one wherever the exhaustive one says the point is anywhere near the seam, and
+never returns less (a restricted minimum cannot).
+
+The window is scanned coarsely first, because `|p − c(u)|²` need not be unimodal
+across the whole of it, then the best bracket is closed by golden section.
+"""
+function seam_distance(seam::BaseballSeam{T}, p::NTuple{3,<:Real};
+                       window::Real = 0.6, scan::Integer = 8,
+                       iterations::Integer = 30) where {T}
+    px, py, pz = T(p[1]), T(p[2]), T(p[3])
+    d2(u) = begin
+        q = seam_point(seam, u)
+        (q[1] - px)^2 + (q[2] - py)^2 + (q[3] - pz)^2
+    end
+
+    u0 = atan(py, px)
+    w = T(window)
+    lo, hi = u0 - w, u0 + w
+    step = (hi - lo) / scan
+
+    # Coarse scan, keeping the bracket either side of the best sample.
+    best = lo
+    fbest = d2(lo)
+    for m in 1:scan
+        u = lo + m * step
+        f = d2(u)
+        if f < fbest
+            fbest = f
+            best = u
+        end
+    end
+    a, b = max(best - step, lo), min(best + step, hi)
+
+    # Golden section: no derivatives, and it cannot leave the bracket.
+    invφ = T(0.6180339887498949)
+    c, d = b - invφ * (b - a), a + invφ * (b - a)
+    fc, fd = d2(c), d2(d)
+    for _ in 1:iterations
+        if fc < fd
+            b, d, fd = d, c, fc
+            c = b - invφ * (b - a)
+            fc = d2(c)
+        else
+            a, c, fc = c, d, fd
+            d = a + invφ * (b - a)
+            fd = d2(d)
+        end
+    end
+    return sqrt(min(fbest, fc, fd))
+end
