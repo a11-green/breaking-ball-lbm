@@ -119,3 +119,58 @@ function orientation_drift(q0::Quat{T}, q1::Quat{T}, radius_nodes::Real) where {
     c = clamp(abs(rel.w) / abs(rel), -one(T), one(T))
     return 2 * acos(c) * T(radius_nodes)
 end
+
+"""
+    aerodynamic_coefficients(force, state, props; ρ)
+
+Decompose an aerodynamic force into `(C_D, C_L, C_side)` on the natural frame of
+a spinning ball:
+
+  * `û = V/|V|` — drag acts along `−û`, so `C_D` is positive for a ball that is
+    being slowed;
+  * `n̂ = (ω × û)/|ω × û|` — the Magnus direction, which by construction ignores
+    whatever part of the spin lies along the flight path;
+  * `b̂ = û × n̂` — perpendicular to both, so a force here is lift the Magnus
+    effect cannot explain.
+
+That third number is the point of the whole project. §1.4: a real ball develops
+force out of the Magnus plane because the seam makes the pressure distribution
+asymmetric about it, and that is why sweepers and gyroballs do not break the way
+the textbook says. A coefficient model can only ever report zero there; the CFD
+can report what it measures.
+
+When the spin is parallel to the flight path the Magnus direction is undefined —
+there is no Magnus force to have — and the whole transverse force is reported as
+side force, which is what it is.
+"""
+function aerodynamic_coefficients(force::NTuple{3,<:Real}, s::BallState{T},
+                                  p::BallProperties{T};
+                                  ρ::Real = AIR_DENSITY) where {T}
+    U = speed(s)
+    U == 0 && return (zero(T), zero(T), zero(T))
+    q = T(0.5) * T(ρ) * U^2 * p.area
+    F = T.(force)
+    û = s.v ./ U
+
+    cx = s.ω[2] * û[3] - s.ω[3] * û[2]
+    cy = s.ω[3] * û[1] - s.ω[1] * û[3]
+    cz = s.ω[1] * û[2] - s.ω[2] * û[1]
+    cn = sqrt(cx^2 + cy^2 + cz^2)
+
+    CD = -(F[1] * û[1] + F[2] * û[2] + F[3] * û[3]) / q
+
+    if cn < eps(T) * max(sqrt(sum(abs2, s.ω)), one(T))
+        # No Magnus axis: report the whole transverse force as side force.
+        par = F[1] * û[1] + F[2] * û[2] + F[3] * û[3]
+        perp = (F[1] - par * û[1], F[2] - par * û[2], F[3] - par * û[3])
+        return (CD, zero(T), sqrt(sum(abs2, perp)) / q)
+    end
+
+    n̂ = (cx / cn, cy / cn, cz / cn)
+    b̂ = (û[2] * n̂[3] - û[3] * n̂[2],
+         û[3] * n̂[1] - û[1] * n̂[3],
+         û[1] * n̂[2] - û[2] * n̂[1])
+    CL = (F[1] * n̂[1] + F[2] * n̂[2] + F[3] * n̂[3]) / q
+    Cs = (F[1] * b̂[1] + F[2] * b̂[2] + F[3] * b̂[3]) / q
+    return (CD, CL, Cs)
+end

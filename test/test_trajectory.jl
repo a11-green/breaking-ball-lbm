@@ -296,3 +296,64 @@ end
     fine = grid_budget(; nodes_per_diameter = 80, domain_diameters = 8)
     @test fine.hours / wide.hours ≈ 16 rtol = 1e-10
 end
+
+@testset "force coefficients" begin
+    props = BaseballProperties()
+    aero = CoefficientAero(props; CD = 0.35, CL_slope = 1.0)
+
+    @testset "the analytic model reports back its own coefficients" begin
+        s = BallState(; velocity = (39.0, 0.0, 0.0),
+                      spin = spin_from_rpm((0.0, -1.0, 0.0), 2400))
+        F, _ = aero(s)
+        CD, CL, Cs = aerodynamic_coefficients(F, s, props)
+        @test CD ≈ 0.35 rtol = 1e-12
+        # C_L = S⊥, and with the spin perpendicular to the flight path that is S.
+        @test CL ≈ spin_parameter(s, props) rtol = 1e-12
+        @test abs(Cs) < 1e-14          # a coefficient model has no side force
+    end
+
+    @testset "drag alone is drag alone" begin
+        s = BallState(; velocity = (30.0, 5.0, -2.0),
+                      spin = spin_from_rpm((0.0, 0.0, 1.0), 2000))
+        U = speed(s)
+        q = 0.5 * AIR_DENSITY * U^2 * props.area
+        F = (-0.4 * q / U) .* s.v            # pure drag, C_D = 0.4
+        CD, CL, Cs = aerodynamic_coefficients(F, s, props)
+        @test CD ≈ 0.4 rtol = 1e-12
+        @test abs(CL) < 1e-14
+        @test abs(Cs) < 1e-14
+    end
+
+    @testset "force out of the Magnus plane is reported as side force" begin
+        # The quantity the project exists to measure (§1.4): a coefficient model
+        # cannot produce it, so it has to come from the flow.
+        s = BallState(; velocity = (39.0, 0.0, 0.0),
+                      spin = spin_from_rpm((0.0, 0.0, 1.0), 2708))
+        U = speed(s); q = 0.5 * AIR_DENSITY * U^2 * props.area
+        F, _ = aero(s)
+        side = (0.0, 0.0, 0.12 * q)          # ω along z, V along x → Magnus is +y
+        CD, CL, Cs = aerodynamic_coefficients(F .+ side, s, props)
+        @test CD ≈ 0.35 rtol = 1e-12
+        @test CL ≈ spin_parameter(s, props) rtol = 1e-12
+        @test abs(Cs) ≈ 0.12 rtol = 1e-12
+    end
+
+    @testset "gyro spin has no Magnus direction to report" begin
+        s = BallState(; velocity = (39.0, 0.0, 0.0),
+                      spin = spin_from_rpm((1.0, 0.0, 0.0), 2400))
+        U = speed(s); q = 0.5 * AIR_DENSITY * U^2 * props.area
+        CD, CL, Cs = aerodynamic_coefficients((-0.3 * q, 0.0, 0.1 * q), s, props)
+        @test CD ≈ 0.3 rtol = 1e-12
+        @test CL == 0                       # not "small": undefined, so not claimed
+        @test Cs ≈ 0.1 rtol = 1e-12
+    end
+
+    @testset "the decomposition loses nothing" begin
+        s = BallState(; velocity = (35.0, -3.0, 1.5),
+                      spin = spin_from_rpm((0.2, -0.9, 0.4), 2500))
+        U = speed(s); q = 0.5 * AIR_DENSITY * U^2 * props.area
+        F = (-1.1, 0.4, 0.7)
+        CD, CL, Cs = aerodynamic_coefficients(F, s, props)
+        @test sqrt(CD^2 + CL^2 + Cs^2) * q ≈ sqrt(sum(abs2, F)) rtol = 1e-12
+    end
+end
