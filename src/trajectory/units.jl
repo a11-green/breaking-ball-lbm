@@ -103,3 +103,52 @@ function resolution_report(u::LatticeUnits{T}) where {T}
             reynolds = lattice_reynolds(u),
             steps_per_second = 1 / u.dt)
 end
+
+"""
+    boundary_layer_thickness(; diameter, speed, ν)
+
+Laminar boundary-layer thickness at the sphere's equator, `5√(νx/U)` with `x`
+the arc length from the stagnation point.
+
+Worth having as a number rather than an intuition, because at pitching speeds it
+comes out at 0.76 mm against a seam ridge of 0.79 mm. The seam is one boundary
+layer tall — which is exactly the condition for a roughness element to trip
+transition (§1.3), and also means that resolving the seam and resolving the
+boundary layer are not two requirements but one.
+"""
+function boundary_layer_thickness(; diameter::Real = 0.0748, speed::Real = 39.0,
+                                  ν::Real = AIR_VISCOSITY)
+    x = π * diameter / 4          # arc from the stagnation point to the equator
+    return 5 * sqrt(ν * x / speed)
+end
+
+"""
+    grid_budget(; nodes_per_diameter, domain_diameters, ...)
+
+What one grid choice costs and what it actually resolves.
+
+The two columns that decide everything are `seam_cells` and `blockage`, and they
+pull against each other: a cubic domain of `L` diameters at `N` points per
+diameter is `(N L)³` nodes, so buying seam resolution costs domain width at the
+third power. `bytes_per_node` defaults to the populations plus the one `Int32`
+per node the wall geometry carries.
+"""
+function grid_budget(; nodes_per_diameter::Integer = 40, domain_diameters::Real = 8,
+                     diameter::Real = 0.0748, seam_height::Real = 0.00079,
+                     speed::Real = 39.0, lattice_speed::Real = 0.05,
+                     ν::Real = AIR_VISCOSITY, bytes_per_node::Real = 27 * 4 + 4,
+                     mlups::Real = 2300, flight_time::Real = 0.45)
+    units = LatticeUnits(; diameter = diameter, nodes_per_diameter = nodes_per_diameter,
+                         speed = speed, lattice_speed = lattice_speed, ν = ν)
+    edge = round(Int, nodes_per_diameter * domain_diameters)
+    nodes = Int128(edge)^3
+    steps = flight_time / units.dt
+    return (edge = edge, nodes = Int(nodes), gib = Float64(nodes) * bytes_per_node / 2^30,
+            dx_mm = 1000 * units.dx,
+            seam_cells = seam_height / units.dx,
+            boundary_layer_cells =
+                boundary_layer_thickness(; diameter = diameter, speed = speed, ν = ν) / units.dx,
+            blockage = 0.5 / domain_diameters,     # sphere radius over box edge
+            steps = steps,
+            hours = Float64(nodes) * steps / (mlups * 1e6) / 3600)
+end

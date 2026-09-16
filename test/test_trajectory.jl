@@ -267,3 +267,32 @@ end
         @test 0.35 < m.flight_time < 0.55
     end
 end
+
+@testset "grid budget" begin
+    b = grid_budget(; nodes_per_diameter = 40, domain_diameters = 8)
+    @test b.edge == 320
+    @test b.nodes == 320^3
+    @test b.gib ≈ 320^3 * 112 / 2^30 rtol = 1e-12
+    @test b.seam_cells ≈ 0.00079 / (0.0748 / 40) rtol = 1e-12
+
+    # The design document claimed 40 points per diameter would put two or three
+    # cells across the seam ridge. It puts less than half of one.
+    @test b.seam_cells < 0.5
+
+    # Seam and boundary layer resolve together: the ridge is one boundary layer
+    # tall, which is what makes it a trip rather than a bump (§1.3).
+    @test 0.9 < b.seam_cells / b.boundary_layer_cells < 1.15
+    @test boundary_layer_thickness() < 0.00079      # and just under it
+
+    # Domain width costs seam resolution at the third power.
+    wide = grid_budget(; nodes_per_diameter = 40, domain_diameters = 8)
+    tight = grid_budget(; nodes_per_diameter = 80, domain_diameters = 4)
+    @test wide.nodes == tight.nodes
+    @test tight.seam_cells ≈ 2 * wide.seam_cells rtol = 1e-12
+    @test tight.blockage ≈ 2 * wide.blockage rtol = 1e-12
+
+    # Refining raises the step count as well as the node count, so cost goes as
+    # the fourth power of the resolution.
+    fine = grid_budget(; nodes_per_diameter = 80, domain_diameters = 8)
+    @test fine.hours / wide.hours ≈ 16 rtol = 1e-10
+end
