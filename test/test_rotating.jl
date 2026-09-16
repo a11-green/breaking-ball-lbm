@@ -126,6 +126,26 @@
         @test count(!=(0.0), coarse .- fine) > 10
     end
 
+    @testset "single precision moves the wall by a ten-thousandth of a cell" begin
+        # Same statement as above, across precisions rather than across depths.
+        # In Float32 a bin at twenty halvings is eight ulps wide, so the two
+        # bisections wander a few bins apart on most links — which is why the
+        # bar for any second implementation is the wall's *position*, in cells,
+        # rather than a count of bins.
+        g32 = BaseballGeometry(; diameter = Float32(0.0748), seam_height = Float32(0.00079),
+                               seam_amplitude = Float32(0.7))
+        w32 = RotatingWall(g32, dims, Float32(dx))
+        q64 = quat_from_axis_angle((0.0, 0.0, 1.0), 0.37)
+        q32 = quat_from_axis_angle((0.0f0, 0.0f0, 1.0f0), 0.37f0)
+        recut!(rw, q64)
+        recut!(w32, q32)
+
+        @test w32.wall.kind == rw.wall.kind
+        worst = maximum(abs.(Float64.(w32.wall.deltas) .- rw.wall.deltas))
+        @test worst < 1e-4                   # of a lattice spacing
+        @test worst > 2.0^-20                # and more than one bin, as expected
+    end
+
     @testset "a smooth sphere cannot notice being turned" begin
         smooth = BaseballGeometry(; seam_height = 0.0)
         sw = RotatingWall(smooth, dims, dx)
