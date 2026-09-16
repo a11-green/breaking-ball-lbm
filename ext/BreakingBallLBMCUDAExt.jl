@@ -52,21 +52,30 @@ function BreakingBallLBM.gpu_run!(g::CuArray{T,4}, nsteps::Integer, τ::Real;
     return g
 end
 
-"""Plain copy, for measuring what bandwidth this card actually delivers."""
+"""
+Plain copy, for measuring what bandwidth this card actually delivers.
+
+A grid-stride loop rather than one element per thread: each thread then has
+several loads in flight, which is what it takes to saturate the memory system.
+One element per thread measured about 5% under what the LBM kernel itself
+sustains, i.e. it was reporting a ceiling below the floor.
+"""
 function copy_kernel!(dst, src)
     i = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
-    if i <= length(dst)
-        @inbounds dst[i] = src[i]
+    stride = gridDim().x * blockDim().x
+    @inbounds while i <= length(dst)
+        dst[i] = src[i]
+        i += stride
     end
     return nothing
 end
 
 function BreakingBallLBM.gpu_copy_bandwidth(::Type{T} = Float32; n = 64_000_000,
                                             repeats = 20) where {T}
-    src = CUDA.zeros(T, n)
+    src = CUDA.rand(T, n)      # not zeros: those can compress in flight
     dst = CUDA.zeros(T, n)
     threads = 256
-    blocks = cld(n, threads)
+    blocks = min(cld(n, threads), 8192)
     @cuda threads = threads blocks = blocks copy_kernel!(dst, src)   # warm up
     CUDA.synchronize()
     t = CUDA.@elapsed begin
