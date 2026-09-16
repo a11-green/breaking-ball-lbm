@@ -22,6 +22,19 @@ using Printf
 
 const BBL = BreakingBallLBM
 
+"""
+Free device memory in bytes.
+
+CUDA.jl has spelled this differently across versions, and the benchmark should
+not fall over because of a name, so try what exists and fall back to the total.
+"""
+function free_memory()
+    for name in (:available_memory, :free_memory)
+        isdefined(CUDA, name) && return Int(getproperty(CUDA, name)())
+    end
+    return Int(CUDA.totalmem(CUDA.device()))
+end
+
 """A Taylor-Green state in cube-slot order, on the host."""
 function host_state(::Type{T}, n::Int, τ::Real; nz::Int = n) where {T}
     tg = TaylorGreen(u0 = 0.02, n = n, ν = viscosity_from_tau(τ))
@@ -97,7 +110,7 @@ function main()
     dev = CUDA.device()
     total = CUDA.totalmem(dev) / 2^30
     @printf("Device: %s\n", CUDA.name(dev))
-    @printf("Memory: %.1f GiB total, %.1f GiB free\n", total, CUDA.available_memory() / 2^30)
+    @printf("Memory: %.1f GiB total, %.1f GiB free\n", total, free_memory() / 2^30)
     println()
 
     println("Correctness (kernels must match the CPU reference before timings mean anything)")
@@ -125,7 +138,7 @@ function main()
                     T, operator, n, m, roof, 100 * m / roof)
         catch err
             @printf("%-9s %-16s %-6d skipped (%s)\n", T, operator, n,
-                    err isa OutOfGPUMemoryError ? "out of memory" : sprint(showerror, err))
+                    first(split(sprint(showerror, err), '\n')))
         end
         flush(stdout)
     end
@@ -134,7 +147,7 @@ function main()
     # What the production run can afford.
     for T in (Float32, Float64)
         per_node = 27 * sizeof(T)
-        nodes = 0.85 * CUDA.available_memory() / per_node
+        nodes = 0.85 * free_memory() / per_node
         edge = floor(Int, cbrt(nodes))
         @printf("%-8s %d B/node → about %.0f M nodes, i.e. a cube of %d³\n",
                 T, per_node, nodes / 1e6, edge)
