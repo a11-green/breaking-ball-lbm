@@ -26,6 +26,22 @@ Only D3Q27 is supported here. D3Q19 stays on the reference two-lattice path,
 where it is only ever used for verification against analytic solutions.
 """
 
+"""
+    shift_periodic(i, c, n)
+
+Neighbour index `i + c` wrapped into `1:n`, for `c ∈ {-1, 0, 1}`.
+
+`mod1` would do the same, but modulo by a runtime `n` is an integer division, and
+a GPU has no instruction for that. With the slot loops unrolled `c` is a literal,
+so this collapses to a single compare-and-select — worth it when the gather and
+scatter between them wrap 162 indices per node update.
+"""
+@inline function shift_periodic(i::Int, c::Int, n::Int)
+    c == 0 && return i
+    c == 1 && return i == n ? 1 : i + 1
+    return i == 1 ? n : i - 1
+end
+
 """Velocity of cube slot `s`."""
 @inline function cube_velocity(s::Integer)
     t = s - 1
@@ -95,13 +111,15 @@ Collect the 27 populations that belong to node `(i, j, k)` at the current time.
 @inline function aa_gather!(buf, g, even::Bool, i::Int, j::Int, k::Int,
                             nx::Int, ny::Int, nz::Int)
     if even
-        @inbounds for s in 1:27
-            buf[s] = g[i, j, k, s]
+        Base.Cartesian.@nexprs 27 s -> begin
+            @inbounds buf[s] = g[i, j, k, s]
         end
     else
-        @inbounds for s in 1:27
-            cx, cy, cz = cube_velocity(s)
-            buf[s] = g[mod1(i - cx, nx), mod1(j - cy, ny), mod1(k - cz, nz), 28-s]
+        Base.Cartesian.@nexprs 27 s -> begin
+            cv_s = cube_velocity(s)
+            @inbounds buf[s] = g[shift_periodic(i, -cv_s[1], nx),
+                                 shift_periodic(j, -cv_s[2], ny),
+                                 shift_periodic(k, -cv_s[3], nz), 28-s]
         end
     end
     return buf
@@ -115,13 +133,15 @@ Write the post-collision populations of node `(i, j, k)` back out.
 @inline function aa_scatter!(g, buf, even::Bool, i::Int, j::Int, k::Int,
                              nx::Int, ny::Int, nz::Int)
     if even
-        @inbounds for s in 1:27
-            g[i, j, k, 28-s] = buf[s]
+        Base.Cartesian.@nexprs 27 s -> begin
+            @inbounds g[i, j, k, 28-s] = buf[s]
         end
     else
-        @inbounds for s in 1:27
-            cx, cy, cz = cube_velocity(s)
-            g[mod1(i + cx, nx), mod1(j + cy, ny), mod1(k + cz, nz), s] = buf[s]
+        Base.Cartesian.@nexprs 27 s -> begin
+            cv_s = cube_velocity(s)
+            @inbounds g[shift_periodic(i, cv_s[1], nx),
+                        shift_periodic(j, cv_s[2], ny),
+                        shift_periodic(k, cv_s[3], nz), s] = buf[s]
         end
     end
     return g
@@ -143,13 +163,13 @@ checked on the host.
     mx = zero(T)
     my = zero(T)
     mz = zero(T)
-    @inbounds for s in 1:27
-        fq = buf[s]
-        cx, cy, cz = cube_velocity(s)
-        ρ += fq
-        mx += T(cx) * fq
-        my += T(cy) * fq
-        mz += T(cz) * fq
+    Base.Cartesian.@nexprs 27 s -> begin
+        @inbounds fq_s = buf[s]
+        cv_s = cube_velocity(s)
+        ρ += fq_s
+        mx += T(cv_s[1]) * fq_s
+        my += T(cv_s[2]) * fq_s
+        mz += T(cv_s[3]) * fq_s
     end
     invρ = one(T) / ρ
     ux = (mx + force[1] / 2) * invρ
@@ -165,19 +185,22 @@ checked on the host.
         pre = one(T) - ω / 2
         # Everything independent of the direction, computed once.
         usq_term = one(T) - T(HALF_INV_CS2) * (ux * ux + uy * uy + uz * uz)
-        @inbounds for s in 1:27
-            cx, cy, cz = cube_velocity(s)
-            cxT, cyT, czT = T(cx), T(cy), T(cz)
-            w = cube_weight(T, s)
-            cu = cxT * ux + cyT * uy + czT * uz
+        Base.Cartesian.@nexprs 27 s -> begin
+            cv_s = cube_velocity(s)
+            cx_s = T(cv_s[1])
+            cy_s = T(cv_s[2])
+            cz_s = T(cv_s[3])
+            w_s = cube_weight(T, s)
+            cu_s = cx_s * ux + cy_s * uy + cz_s * uz
 
-            feq = w * ρ * (usq_term + T(INV_CS2) * cu + T(HALF_INV_CS4) * cu * cu)
-            fq = buf[s] - ω * (buf[s] - feq)
+            feq_s = w_s * ρ * (usq_term + T(INV_CS2) * cu_s + T(HALF_INV_CS4) * cu_s * cu_s)
+            @inbounds fq_s = buf[s] - ω * (buf[s] - feq_s)
 
-            sx = T(INV_CS2) * (cxT - ux) + T(INV_CS4) * cu * cxT
-            sy = T(INV_CS2) * (cyT - uy) + T(INV_CS4) * cu * cyT
-            sz = T(INV_CS2) * (czT - uz) + T(INV_CS4) * cu * czT
-            buf[s] = fq + pre * w * (sx * force[1] + sy * force[2] + sz * force[3])
+            sx_s = T(INV_CS2) * (cx_s - ux) + T(INV_CS4) * cu_s * cx_s
+            sy_s = T(INV_CS2) * (cy_s - uy) + T(INV_CS4) * cu_s * cy_s
+            sz_s = T(INV_CS2) * (cz_s - uz) + T(INV_CS4) * cu_s * cz_s
+            @inbounds buf[s] = fq_s + pre * w_s *
+                               (sx_s * force[1] + sy_s * force[2] + sz_s * force[3])
         end
     end
     return buf

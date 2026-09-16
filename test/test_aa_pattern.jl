@@ -16,6 +16,14 @@
         end
     end
 
+    @testset "periodic shift matches mod1" begin
+        # The kernel replaces mod1 with compares because modulo by a runtime n is
+        # an integer division. It has to agree with mod1 everywhere, edges first.
+        for n in (1, 2, 3, 5, 16, 64), i in 1:n, c in (-1, 0, 1)
+            @test BBL.shift_periodic(i, c, n) == mod1(i + c, n)
+        end
+    end
+
     @testset "cube equilibrium matches the lattice equilibrium" begin
         for (ρ, u) in ((1.0, (0.0, 0.0, 0.0)), (0.98, (0.05, -0.02, 0.03)))
             for q in 1:27
