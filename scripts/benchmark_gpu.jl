@@ -8,7 +8,11 @@
 # without a GPU, so the correctness checks here are the first time the kernels
 # execute at all — run it before trusting any timing it prints.
 #
-#   julia --project=. -e 'using Pkg; Pkg.add(["CUDA", "StaticArrays"])'
+# CUDA and StaticArrays are weak dependencies, so install them into the default
+# environment, not the project one — adding them with --project=. would put them
+# in [deps] as well as [weakdeps], which Pkg rejects.
+#
+#   julia -e 'using Pkg; Pkg.add(["CUDA", "StaticArrays"])'
 #   julia --project=. scripts/benchmark_gpu.jl
 
 using BreakingBallLBM

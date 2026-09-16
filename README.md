@@ -25,10 +25,15 @@ julia --project=. -e 'using Pkg; Pkg.test()'
 
 ### GPU（要 NVIDIA GPU）
 
+CUDA と StaticArrays は弱依存（`[weakdeps]`）なので、**プロジェクト環境ではなくデフォルト環境に**入れる。
+`--project=.` を付けて `Pkg.add` すると `[deps]` と `[weakdeps]` が衝突してエラーになる。
+
 ```bash
-julia --project=. -e 'using Pkg; Pkg.add(["CUDA", "StaticArrays"])'
+julia -e 'using Pkg; Pkg.add(["CUDA", "StaticArrays"])'   # デフォルト環境へ
 julia --project=. scripts/benchmark_gpu.jl
 ```
+
+デフォルト環境は常に `LOAD_PATH` に含まれるため、`--project=.` で実行してもこの2つは読み込まれ、拡張が有効になる。
 
 このスクリプトはタイミングを測る前に、GPUの結果がCPU参照実装と一致するか、Taylor-Green渦の減衰から粘性が正しく再現されるかを自己検証する。検証に失敗した場合はタイミングを出さずに停止する。
 
