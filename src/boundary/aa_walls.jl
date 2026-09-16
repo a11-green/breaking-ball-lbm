@@ -211,17 +211,27 @@ end
     aa_run_walls!(g, wall, nsteps, τ; force, operator, spin, rule, ...)
 
 Reference CPU driver for the wall-aware AA-pattern, returning the `(force,
-torque)` of the final step. `nsteps` must be even.
+torque)`. `nsteps` must be even.
+
+`reduction` picks what the return value is. `:last` gives the final step's
+force, which is what the two-lattice reference produces and so what the
+equality tests compare against. `:mean` averages over the whole call, which is
+what the coupled loop wants: the instantaneous momentum-exchange force on a
+body in turbulent flow fluctuates by far more than the mean it is fluctuating
+about, so a single step is a poor sample to feed a trajectory.
 """
 function aa_run_walls!(g::Array{T,4}, wall::WallField{T}, nsteps::Integer, τ::Real;
                        force::NTuple{3,<:Real} = (0, 0, 0),
                        operator::Symbol = :central_moment,
                        spin::NTuple{3,<:Real} = (0, 0, 0),
                        rule::Symbol = :interpolated_local,
+                       reduction::Symbol = :last,
                        omega_bulk::Real = 1.0, omega_higher::Real = 1.0) where {T}
     iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
     rule in (:interpolated_local, :halfway) ||
         throw(ArgumentError("rule must be :interpolated_local or :halfway, got $rule"))
+    reduction in (:last, :mean) ||
+        throw(ArgumentError("reduction must be :last or :mean, got $reduction"))
 
     nx, ny, nz = size(g, 1), size(g, 2), size(g, 3)
     buf = Vector{T}(undef, 27)
@@ -231,6 +241,8 @@ function aa_run_walls!(g::Array{T,4}, wall::WallField{T}, nsteps::Integer, τ::R
     halfway = rule === :halfway
     total_force = (zero(T), zero(T), zero(T))
     total_torque = (zero(T), zero(T), zero(T))
+    sum_force = (zero(T), zero(T), zero(T))
+    sum_torque = (zero(T), zero(T), zero(T))
 
     for n in 1:nsteps
         even = isodd(n)
@@ -243,6 +255,9 @@ function aa_run_walls!(g::Array{T,4}, wall::WallField{T}, nsteps::Integer, τ::R
             total_force = total_force .+ f
             total_torque = total_torque .+ t
         end
+        sum_force = sum_force .+ total_force
+        sum_torque = sum_torque .+ total_torque
     end
+    reduction === :mean && return sum_force ./ nsteps, sum_torque ./ nsteps
     return total_force, total_torque
 end

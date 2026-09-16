@@ -32,6 +32,7 @@ include("trajectory/body.jl")
 include("trajectory/frame.jl")
 include("trajectory/aero_model.jl")
 include("trajectory/trajectory.jl")
+include("trajectory/coupling.jl")
 include("validation/sphere_array.jl")
 
 export LBMState, Lattice, D3Q19, D3Q27,
@@ -70,7 +71,9 @@ export LBMState, Lattice, D3Q19, D3Q27,
     seam_orientation, orientation_drift,
     CoefficientAero, BallisticAero, no_magnus,
     PLATE_DISTANCE, PFX_SEGMENT, simulate_trajectory, state_at_distance,
-    PitchMetrics, pitch_metrics, inches
+    PitchMetrics, pitch_metrics, inches,
+    mean_fluid_velocity, fluid_node_count, to_lattice_force,
+    PitchRun, PitchState, couple_step!, couple_residual, spin_up!, fly!
 
 """
     gpu_run!(g, nsteps, τ; force, operator, omega_bulk, omega_higher)
