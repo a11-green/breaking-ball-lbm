@@ -46,7 +46,7 @@ export LBMState, Lattice, D3Q19, D3Q27,
     collide!, collide_central_moments!, stream!, step!, run!, fluid_velocity,
     cube_velocity, cube_opposite, cube_weight, cube_equilibrium,
     to_cube_order!, from_cube_order!, aa_gather!, aa_scatter!, collide_buffer!,
-    aa_step_node!, aa_run!, gpu_run!, gpu_run_walls!, gpu_wall, gpu_flow,
+    aa_step_node!, aa_run!, gpu_run!, gpu_run_walls!, gpu_wall, gpu_flow, gpu_rotating_flow,
     gpu_copy_bandwidth, gpu_backend_loaded,
     Smagorinsky, total_relaxation_time, eddy_viscosity, nonequilibrium_flux_norm,
     strain_rate_magnitude,
@@ -54,9 +54,10 @@ export LBMState, Lattice, D3Q19, D3Q27,
     bounce_back_values!, apply_bounce_back!, init_solid!,
     WallField, build_wall_field, aa_scatter_walls!, aa_step_node_walls!, aa_run_walls!,
     BaseballSeam, seam_point, seam_polyline, seam_length, seam_distance,
-    BaseballGeometry, sdf, sdf_exhaustive, sphere_sdf, sdf_field, sdf_field!, solid_volume,
+    BaseballGeometry, BallShape, shape_sdf, sdf, sdf_exhaustive, sphere_sdf, sdf_field, sdf_field!, solid_volume,
     RotatingWall, recut!, refill_fresh!, body_sdf, shell_is_sufficient,
     maybe_recut!, surface_drift_per_step, max_substeps,
+    recut_distance, recut_delta, recut_column!, refill_node!,
     TaylorGreen, PoiseuilleChannel, poiseuille_velocity, poiseuille_peak, channel_sdf,
     sphere_sdf_field, sphere_sdf_fn, exact_sphere_delta,
     hasimoto_factor, stokes_drag, superficial_velocity,
@@ -121,6 +122,14 @@ scratch and the fluid mask. Pass the result to [`couple_step!`](@ref) in place
 of a host `WallField`.
 """
 function gpu_flow end
+
+"""
+    gpu_rotating_flow(rw)
+
+Move a [`RotatingWall`](@ref) to the device, with the scratch a re-cut needs.
+Defined by the CUDA extension.
+"""
+function gpu_rotating_flow end
 
 """Whether the CUDA extension has been loaded."""
 gpu_backend_loaded() = !isnothing(Base.get_extension(@__MODULE__, :BreakingBallLBMCUDAExt))

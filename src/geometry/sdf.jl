@@ -36,6 +36,27 @@ function BaseballGeometry(; diameter::Real = 0.0748, seam_height::Real = 0.00079
     return BaseballGeometry{T}(radius, T(seam_height), seam, seam_polyline(seam, seam_samples))
 end
 
+"""
+The ball's shape with nothing in it that cannot go to a GPU.
+
+`BaseballGeometry` carries the sampled polyline, which is a `Vector` and so
+cannot be passed to a kernel. Everything the *fast* distance needs is two
+scalars and the seam's own two, so the shape travels as this instead — and the
+same function then evaluates it on the host and on the device, which is what
+makes the re-cut kernel testable against the reference loop.
+"""
+struct BallShape{T<:AbstractFloat}
+    seam::BaseballSeam{T}
+    seam_height::T
+end
+
+"""Signed distance to the seamed ball, in metres, from the isbits shape."""
+@inline function shape_sdf(shape::BallShape{T}, p::NTuple{3,T}) where {T}
+    ds = sqrt(p[1]^2 + p[2]^2 + p[3]^2) - shape.seam.radius
+    shape.seam_height > 0 || return ds
+    return min(ds, seam_distance(shape.seam, p) - shape.seam_height)
+end
+
 """Signed distance to the smooth sphere alone."""
 @inline function sphere_sdf(geom::BaseballGeometry{T}, p::NTuple{3,T}) where {T}
     return sqrt(p[1]^2 + p[2]^2 + p[3]^2) - geom.radius
@@ -52,11 +73,10 @@ what makes re-cutting the geometry as the ball turns affordable at all
 (`geometry/rotating.jl`); [`sdf_exhaustive`](@ref) keeps the polyline version as
 the reference the fast one is tested against.
 """
-function sdf(geom::BaseballGeometry{T}, p::NTuple{3,T}) where {T}
-    ds = sphere_sdf(geom, p)
-    geom.seam_height > 0 || return ds
-    return min(ds, seam_distance(geom.seam, p) - geom.seam_height)
-end
+sdf(geom::BaseballGeometry{T}, p::NTuple{3,T}) where {T} = shape_sdf(BallShape(geom), p)
+
+"""The isbits shape of a geometry, for handing to a kernel."""
+BallShape(geom::BaseballGeometry{T}) where {T} = BallShape{T}(geom.seam, geom.seam_height)
 
 """The same distance from the sampled polyline, walked in full — the reference."""
 function sdf_exhaustive(geom::BaseballGeometry{T}, p::NTuple{3,T}) where {T}

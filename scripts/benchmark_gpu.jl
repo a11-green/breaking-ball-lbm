@@ -179,6 +179,68 @@ function check_coupling(::Type{T}; n = 20, radius = 3.5, cycles = 6,
     return ok
 end
 
+"""
+Does the device re-cut the seam the way the host does?
+
+The re-cut is the one piece where host and device run genuinely different code —
+two kernel launches against a pair of loops — so this compares the whole result:
+which nodes came out solid, every wall fraction, how many nodes were refilled,
+and the populations they were refilled with.
+"""
+function check_recut(::Type{T}; N = 20, cycles = 6, dims = (44, 44, 44)) where {T}
+    geom = BaseballGeometry(; diameter = T(0.0748), seam_height = T(0.00079),
+                            seam_amplitude = T(0.7))
+    dx = geom.radius * 2 / N
+    host = RotatingWall(geom, dims, dx)
+    dev = gpu_rotating_flow(host)
+
+    s = LBMState{T}(dims..., T(0.55); lattice = D3Q27())
+    init_equilibrium!(s, (i, j, k) -> (1.0, -0.05, 0.0, 0.0))
+    gh = to_cube_order!(similar(s.f), s.f)
+    gd = CuArray(copy(gh))
+    spin = (T(0), T(0), T(2e-3))
+
+    kind_diff = 0
+    worst_δ = 0.0
+    fresh_h = 0
+    fresh_d = 0
+    for m in 1:cycles
+        q = quat_from_axis_angle((T(0), T(0), T(1)), T(0.12) * m)
+        fresh_h += recut!(host, q, gh, spin)
+        fresh_d += recut!(dev, q, gd, spin)
+        kind_diff += count(Array(dev.flow.wall.kind) .!= host.wall.kind)
+        worst_δ = max(worst_δ, maximum(abs.(Array(dev.flow.wall.deltas) .- host.wall.deltas)))
+    end
+
+    pop_err = maximum(abs.(Array(gd) .- gh))
+    tol = T === Float32 ? 1e-4 : 1e-11
+    # fresh_h > 0 matters: with no node flips the refill path is not tested at
+    # all, and the comparison would pass by doing nothing.
+    ok = kind_diff == 0 && worst_δ < tol && fresh_d == fresh_h && fresh_h > 0 &&
+         dev.nfluid == host.nfluid && pop_err < tol
+    @printf("  %-8s re-cut: kind %d differ, delta %.2e, refilled %d/%d, populations %.2e  %s\n",
+            T, kind_diff, worst_δ, fresh_d, fresh_h, pop_err, ok ? "OK" : "FAILED")
+    return ok
+end
+
+"""Milliseconds per re-cut on the device, at production resolution."""
+function recut_ms(::Type{T}; N = 40, repeats = 20) where {T}
+    geom = BaseballGeometry(; diameter = T(0.0748), seam_height = T(0.00079),
+                            seam_amplitude = T(0.7))
+    units = LatticeUnits(T; nodes_per_diameter = N, speed = 39.0)
+    edge = 2 * (N + 8)
+    host = RotatingWall(geom, (edge, edge, edge), units.dx)
+    dev = gpu_rotating_flow(host)
+    recut!(dev, quat_from_axis_angle((T(0), T(0), T(1)), T(0.01)))
+    CUDA.synchronize()
+    t = CUDA.@elapsed begin
+        for m in 1:repeats
+            recut!(dev, quat_from_axis_angle((T(0), T(0), T(1)), T(0.01) * m))
+        end
+    end
+    return 1000 * t / repeats, length(host.shell), count(>(Int32(0)), host.wall.kind)
+end
+
 """Node updates per second, in millions, for the wall-bounded kernel."""
 function wall_mlups(::Type{T}, n::Int; radius = nothing, threads = 128,
                     target_seconds = 2.0) where {T}
@@ -245,6 +307,9 @@ function main()
     for T in (Float64, Float32)
         ok &= check_coupling(T)
     end
+    for T in (Float64, Float32)
+        ok &= check_recut(T)
+    end
     ok || error("correctness checks failed — do not trust the timings below")
     println()
 
@@ -277,6 +342,26 @@ function main()
     for T in (Float32, Float64), n in (64, 128, 192)
         try
             @printf("%-9s %-6d %-12.1f\n", T, n, wall_mlups(T, n))
+        catch err
+            @printf("%-9s %-6d skipped (%s)\n", T, n,
+                    first(split(sprint(showerror, err), '\n')))
+        end
+        flush(stdout)
+    end
+    println()
+
+    # Re-cutting the seam. On the CPU this costs several times the whole flow
+    # solve (scripts/recut_cost.jl), which is why it is here at all.
+    println("Seam re-cut (production geometry, one cut)")
+    @printf("%-9s %-6s %-9s %-10s %-11s %-12s\n",
+            "precision", "N/D", "shell", "boundary", "ms/cut", "h per pitch")
+    for T in (Float32, Float64), n in (20, 40, 60)
+        try
+            ms, shell, boundary = recut_ms(T; N = n)
+            units = LatticeUnits(T; nodes_per_diameter = n, speed = 39.0)
+            cuts = (0.445 / units.dt) / 18          # a cut every ~18 steps (§4.1.1)
+            @printf("%-9s %-6d %-9d %-10d %-11.2f %-12.3f\n",
+                    T, n, shell, boundary, ms, cuts * ms / 1000 / 3600)
         catch err
             @printf("%-9s %-6d skipped (%s)\n", T, n,
                     first(split(sprint(showerror, err), '\n')))

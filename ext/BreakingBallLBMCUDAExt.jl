@@ -197,7 +197,7 @@ The mask is stored rather than derived per call because the mean is taken every
 sub-cycle and `kind` is `Int32`, so comparing it on the fly would mean either a
 type conversion inside the reduction or a second kernel.
 """
-struct DeviceFlow{T<:AbstractFloat,W,C,M}
+mutable struct DeviceFlow{T<:AbstractFloat,W,C,M}
     wall::W
     contrib::C
     fmask::M
@@ -268,6 +268,154 @@ function BreakingBallLBM.flow_mean_velocity(g::CuArray{T,4}, f::DeviceFlow{T},
     return T(ρ / f.nfluid), (T((mx + half * Float64(force[1])) / ρ),
                              T((my + half * Float64(force[2])) / ρ),
                              T((mz + half * Float64(force[3])) / ρ))
+end
+
+"""
+Device state for geometry that turns with the ball.
+
+Wraps the static flow handle and adds what a re-cut needs: the permanent shell
+numbering, scratch for the signed distance and the solid flags, and the shape
+itself — which travels as `BallShape` rather than `BaseballGeometry` because the
+latter carries a sampled polyline and a `Vector` cannot go to a kernel.
+"""
+mutable struct DeviceRotatingFlow{T<:AbstractFloat,F,S,V,P,B}
+    flow::F
+    slot::S
+    shell::V
+    phi::P
+    solid::B
+    was_solid::B
+    shape::BBL.BallShape{T}
+    dx::T
+    center::NTuple{3,T}
+    radius_nodes::T
+    orientation::BBL.Quat{T}
+    fixed_solid::Int
+    nfluid::Int
+    recuts::Int
+end
+
+"""
+    gpu_rotating_flow(rw)
+
+Move a [`RotatingWall`](@ref) and everything the coupled loop needs onto the
+device. The host object stays valid and unaltered, which is what lets the two
+be re-cut side by side and compared.
+"""
+function BreakingBallLBM.gpu_rotating_flow(rw::BBL.RotatingWall{T}) where {T}
+    flow = BreakingBallLBM.gpu_flow(rw.wall)
+    return DeviceRotatingFlow{T,typeof(flow),typeof(CuArray(rw.slot)),
+                              typeof(CuArray(rw.shell)),typeof(CuArray(rw.phi)),
+                              typeof(CuArray(rw.solid))}(
+        flow, CuArray(rw.slot), CuArray(rw.shell), CuArray(rw.phi),
+        CuArray(rw.solid), CuArray(rw.was_solid),
+        BBL.BallShape(rw.geom), rw.dx, rw.center, rw.radius_nodes,
+        rw.orientation, rw.fixed_solid, rw.nfluid, rw.recuts)
+end
+
+function recut_phi_kernel!(phi, solid, shell, shape::BBL.BallShape{T},
+                           back::BBL.Quat{T}, center::NTuple{3,T}, dx::T) where {T}
+    n = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
+    if n <= length(shell)
+        @inbounds ijk = shell[n]
+        φ = BBL.recut_distance(shape, back, center, dx, ijk[1], ijk[2], ijk[3])
+        @inbounds phi[n] = φ
+        @inbounds solid[n] = φ < 0
+    end
+    return nothing
+end
+
+function recut_column_kernel!(kind, deltas, slot, solid, phi, fmask, shell,
+                              shape::BBL.BallShape{T}, back::BBL.Quat{T},
+                              center::NTuple{3,T}, dx::T, nx::Int, ny::Int, nz::Int,
+                              iterations::Int) where {T}
+    n = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
+    if n <= length(shell)
+        @inbounds ijk = shell[n]
+        i, j, k = Int(ijk[1]), Int(ijk[2]), Int(ijk[3])
+        is_solid = BBL.recut_column!(kind, deltas, slot, solid, phi, Int(n), i, j, k,
+                                     shape, back, center, dx, nx, ny, nz, iterations)
+        # The box-mean reduction reads this mask, so it has to move with the cut.
+        @inbounds fmask[i, j, k] = is_solid ? zero(T) : one(T)
+    end
+    return nothing
+end
+
+function refill_kernel!(g, kind, slot, solid, was_solid, shell,
+                        center::NTuple{3,T}, spin::NTuple{3,T},
+                        nx::Int, ny::Int, nz::Int) where {T}
+    n = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
+    if n <= length(shell)
+        @inbounds fresh = was_solid[n] && !solid[n]
+        if fresh
+            @inbounds ijk = shell[n]
+            BBL.refill_node!(g, kind, slot, solid, was_solid,
+                             Int(ijk[1]), Int(ijk[2]), Int(ijk[3]),
+                             center, spin, nx, ny, nz)
+        end
+    end
+    return nothing
+end
+
+"""
+    recut!(drw, q; iterations, threads)
+
+Re-cut the geometry on the device. Two launches, because a node's wall fractions
+depend on whether its neighbours came out solid, and that has to be settled
+across the whole shell before any of it is used.
+"""
+function BreakingBallLBM.recut!(drw::DeviceRotatingFlow{T}, q::BBL.Quat{T};
+                                iterations::Integer = 20, threads::Int = 128) where {T}
+    back = conj(q)
+    drw.was_solid, drw.solid = drw.solid, drw.was_solid
+    n = length(drw.shell)
+    n == 0 && return drw
+    blocks = cld(n, threads)
+    wall = drw.flow.wall
+    nx, ny, nz = size(drw.slot)
+
+    @cuda threads = threads blocks = blocks recut_phi_kernel!(
+        drw.phi, drw.solid, drw.shell, drw.shape, back, drw.center, drw.dx)
+    @cuda threads = threads blocks = blocks recut_column_kernel!(
+        wall.kind, wall.deltas, drw.slot, drw.solid, drw.phi, drw.flow.fmask,
+        drw.shell, drw.shape, back, drw.center, drw.dx, nx, ny, nz, Int(iterations))
+
+    drw.orientation = q
+    drw.recuts += 1
+    drw.nfluid = prod(size(drw.slot)) - drw.fixed_solid - Int(sum(drw.solid))
+    return drw
+end
+
+function BreakingBallLBM.recut!(drw::DeviceRotatingFlow{T}, q::BBL.Quat{T},
+                                g::CuArray{T,4}, spin::NTuple{3,<:Real};
+                                iterations::Integer = 20, threads::Int = 128) where {T}
+    BreakingBallLBM.recut!(drw, q; iterations = iterations, threads = threads)
+    n = length(drw.shell)
+    n == 0 && return 0
+    nx, ny, nz = size(drw.slot)
+    wall = drw.flow.wall
+    @cuda threads = threads blocks = cld(n, threads) refill_kernel!(
+        g, wall.kind, drw.slot, drw.solid, drw.was_solid, drw.shell,
+        drw.center, T.(spin), nx, ny, nz)
+    return Int(mapreduce((a, b) -> (a && !b) ? 1 : 0, +, drw.was_solid, drw.solid;
+                         init = 0))
+end
+
+BreakingBallLBM.flow_fluid_count(drw::DeviceRotatingFlow) = drw.nfluid
+
+BreakingBallLBM.advance_flow!(g::CuArray{T,4}, drw::DeviceRotatingFlow{T},
+                              nsteps::Integer, τ::Real; kwargs...) where {T} =
+    BreakingBallLBM.advance_flow!(g, drw.flow, nsteps, τ; kwargs...)
+
+BreakingBallLBM.flow_mean_velocity(g::CuArray{T,4}, drw::DeviceRotatingFlow{T},
+                                   force::NTuple{3,<:Real}) where {T} =
+    BreakingBallLBM.flow_mean_velocity(g, drw.flow, force)
+
+function BreakingBallLBM.maybe_recut!(g::CuArray{T,4}, drw::DeviceRotatingFlow{T},
+                                      q::BBL.Quat{T}, spin::NTuple{3,<:Real},
+                                      drift::Real) where {T}
+    BBL.orientation_drift(drw.orientation, q, drw.radius_nodes) < drift && return 0
+    return BreakingBallLBM.recut!(drw, q, g, spin)
 end
 
 end # module
