@@ -67,6 +67,29 @@
         @test sum(g) ≈ m0 rtol = 1e-12
     end
 
+    @testset "the collision accepts any AbstractVector buffer" begin
+        # The GPU kernel hands collide_buffer! a thread-local MVector, not a
+        # Vector. Nothing on this path may demand a Vector specifically, or the
+        # device compile fails with a MethodError it cannot even throw. A view is
+        # the stand-in available without StaticArrays.
+        for operator in (:bgk, :central_moment)
+            populations = [0.03 + 0.004 * sin(2.3s) for s in 1:27]
+            force = (1e-5, -2e-5, 3e-6)
+
+            plain = copy(populations)
+            collide_buffer!(plain, 0.7, force, Val(operator), 1.0, 1.0)
+
+            padded = vcat(zeros(5), copy(populations), zeros(5))
+            strided = @view padded[6:32]
+            @test strided isa AbstractVector
+            @test !(strided isa Vector)
+            collide_buffer!(strided, 0.7, force, Val(operator), 1.0, 1.0)
+
+            @test collect(strided) ≈ plain rtol = 1e-14
+            @test all(iszero, padded[1:5]) && all(iszero, padded[33:37])   # stayed in bounds
+        end
+    end
+
     @testset "single precision works end to end" begin
         # The GPU runs Float32, so the host path has to hold up there too.
         n, τ = 24, 0.6

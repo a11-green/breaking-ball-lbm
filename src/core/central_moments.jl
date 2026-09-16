@@ -77,7 +77,7 @@ most two, so the even cases are order four — permutations of `(2,2,0)` and
 end
 
 """Forward one-dimensional transform: three populations → moments about `u`."""
-@inline function to_moments_1d!(buf::Vector{T}, base::Int, stride::Int, u::T) where {T}
+@inline function to_moments_1d!(buf::AbstractVector{T}, base::Int, stride::Int, u::T) where {T}
     @inbounds begin
         fm = buf[base]                 # c = -1
         f0 = buf[base+stride]          # c =  0
@@ -91,7 +91,7 @@ end
 end
 
 """Inverse of [`to_moments_1d!`](@ref)."""
-@inline function to_populations_1d!(buf::Vector{T}, base::Int, stride::Int, u::T) where {T}
+@inline function to_populations_1d!(buf::AbstractVector{T}, base::Int, stride::Int, u::T) where {T}
     @inbounds begin
         k0 = buf[base]
         k1 = buf[base+stride]
@@ -105,7 +105,7 @@ end
 end
 
 """Transform the whole cube in place, populations → central moments about `u`."""
-@inline function to_moments!(buf::Vector{T}, ux::T, uy::T, uz::T) where {T}
+@inline function to_moments!(buf::AbstractVector{T}, ux::T, uy::T, uz::T) where {T}
     for c in 0:2, b in 0:2
         to_moments_1d!(buf, 1 + 3b + 9c, 1, ux)
     end
@@ -118,7 +118,7 @@ end
 end
 
 """Inverse of [`to_moments!`](@ref)."""
-@inline function to_populations!(buf::Vector{T}, ux::T, uy::T, uz::T) where {T}
+@inline function to_populations!(buf::AbstractVector{T}, ux::T, uy::T, uz::T) where {T}
     for b in 0:2, a in 0:2
         to_populations_1d!(buf, 1 + a + 3b, 9, uz)
     end
@@ -138,7 +138,7 @@ force, the deviatoric second-order moments relax at `ω` and their trace at `ωb
 and everything of third order and above has its cumulant relaxed to zero at
 rate `ωh`.
 """
-@inline function relax_moments!(buf::Vector{T}, ρ::T, ω::T, force::NTuple{3,T},
+@inline function relax_moments!(buf::AbstractVector{T}, ρ::T, ω::T, force::NTuple{3,T},
                                 ωb::T = one(T), ωh::T = one(T)) where {T}
     κeq2 = ρ * T(CS2)
     @inbounds begin
