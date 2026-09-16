@@ -42,13 +42,22 @@ end
     return n == 0 ? T(8 / 27) : n == 1 ? T(2 / 27) : n == 2 ? T(1 / 54) : T(1 / 216)
 end
 
+# Reciprocals of the lattice speed of sound, exact in floating point. Dividing by
+# CS2 instead costs a real division: x/CS2 and x*3 differ in the last bit, so the
+# compiler is not allowed to make the substitution itself, and the BGK branch was
+# issuing on the order of 240 divisions per node.
+const INV_CS2 = 3.0          # 1 / c_s²
+const INV_CS4 = 9.0          # 1 / c_s⁴
+const HALF_INV_CS4 = 4.5     # 1 / (2 c_s⁴)
+const HALF_INV_CS2 = 1.5     # 1 / (2 c_s²)
+
 """Equilibrium population for cube slot `s`."""
 @inline function cube_equilibrium(s::Integer, ρ::T, ux::T, uy::T, uz::T) where {T}
     icx, icy, icz = cube_velocity(s)
     cu = T(icx) * ux + T(icy) * uy + T(icz) * uz
     usq = ux * ux + uy * uy + uz * uz
-    return cube_weight(T, s) * ρ * (one(T) + cu / T(CS2) + cu * cu / (2 * T(CS2)^2) -
-                                    usq / (2 * T(CS2)))
+    return cube_weight(T, s) * ρ *
+           (one(T) - T(HALF_INV_CS2) * usq + T(INV_CS2) * cu + T(HALF_INV_CS4) * cu * cu)
 end
 
 """
@@ -142,9 +151,10 @@ checked on the host.
         my += T(cy) * fq
         mz += T(cz) * fq
     end
-    ux = (mx + force[1] / 2) / ρ
-    uy = (my + force[2] / 2) / ρ
-    uz = (mz + force[3] / 2) / ρ
+    invρ = one(T) / ρ
+    ux = (mx + force[1] / 2) * invρ
+    uy = (my + force[2] / 2) * invρ
+    uz = (mz + force[3] / 2) * invρ
 
     if OP === :central_moment
         to_moments!(buf, ux, uy, uz)
@@ -153,17 +163,21 @@ checked on the host.
     else
         ω = one(T) / τ
         pre = one(T) - ω / 2
+        # Everything independent of the direction, computed once.
+        usq_term = one(T) - T(HALF_INV_CS2) * (ux * ux + uy * uy + uz * uz)
         @inbounds for s in 1:27
             cx, cy, cz = cube_velocity(s)
             cxT, cyT, czT = T(cx), T(cy), T(cz)
-            fq = buf[s]
-            fq -= ω * (fq - cube_equilibrium(s, ρ, ux, uy, uz))
+            w = cube_weight(T, s)
             cu = cxT * ux + cyT * uy + czT * uz
-            sx = (cxT - ux) / T(CS2) + cu * cxT / T(CS2)^2
-            sy = (cyT - uy) / T(CS2) + cu * cyT / T(CS2)^2
-            sz = (czT - uz) / T(CS2) + cu * czT / T(CS2)^2
-            buf[s] = fq + pre * cube_weight(T, s) *
-                          (sx * force[1] + sy * force[2] + sz * force[3])
+
+            feq = w * ρ * (usq_term + T(INV_CS2) * cu + T(HALF_INV_CS4) * cu * cu)
+            fq = buf[s] - ω * (buf[s] - feq)
+
+            sx = T(INV_CS2) * (cxT - ux) + T(INV_CS4) * cu * cxT
+            sy = T(INV_CS2) * (cyT - uy) + T(INV_CS4) * cu * cyT
+            sz = T(INV_CS2) * (czT - uz) + T(INV_CS4) * cu * czT
+            buf[s] = fq + pre * w * (sx * force[1] + sy * force[2] + sz * force[3])
         end
     end
     return buf

@@ -144,6 +144,21 @@ function main()
     end
     println()
 
+    # Block size: worth a look, since the kernel keeps 27 values per thread and
+    # occupancy is the first thing that costs.
+    println("Block size (Float32, central moment, n = 128)")
+    @printf("%-9s %-12s\n", "threads", "MLUPS")
+    for threads in (64, 128, 256, 512)
+        try
+            m, _, _ = mlups(Float32, 128, :central_moment; threads = threads)
+            @printf("%-9d %-12.1f\n", threads, m)
+        catch err
+            @printf("%-9d skipped (%s)\n", threads, first(split(sprint(showerror, err), '\n')))
+        end
+        flush(stdout)
+    end
+    println()
+
     # What the production run can afford.
     for T in (Float32, Float64)
         per_node = 27 * sizeof(T)

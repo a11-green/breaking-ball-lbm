@@ -141,6 +141,8 @@ rate `ωh`.
 @inline function relax_moments!(buf::AbstractVector{T}, ρ::T, ω::T, force::NTuple{3,T},
                                 ωb::T = one(T), ωh::T = one(T)) where {T}
     κeq2 = ρ * T(CS2)
+    invρ = one(T) / ρ
+    third = one(T) / 3
     @inbounds begin
         # Momentum: in the co-moving frame the body force is its only content.
         buf[1+1] = force[1] / 2
@@ -152,17 +154,18 @@ rate `ωh`.
         # viscosity, so the trace need not be driven at ω → 2, and damping it at
         # ωb ≈ 1 instead is what buys the stability margin at low τ.
         tr = buf[3] + buf[7] + buf[19]
-        tr_new = tr + ωb * (3 * κeq2 - tr)
-        buf[3] = tr_new / 3 + (one(T) - ω) * (buf[3] - tr / 3)
-        buf[7] = tr_new / 3 + (one(T) - ω) * (buf[7] - tr / 3)
-        buf[19] = tr_new / 3 + (one(T) - ω) * (buf[19] - tr / 3)
+        tr_new = (tr + ωb * (3 * κeq2 - tr)) * third
+        tr_third = tr * third
+        buf[3] = tr_new + (one(T) - ω) * (buf[3] - tr_third)
+        buf[7] = tr_new + (one(T) - ω) * (buf[7] - tr_third)
+        buf[19] = tr_new + (one(T) - ω) * (buf[19] - tr_third)
         buf[5] *= (one(T) - ω)                 # κ110, equilibrium 0
         buf[11] *= (one(T) - ω)                # κ101
         buf[13] *= (one(T) - ω)                # κ011
 
         # Covariance implied by the relaxed second moments, per unit mass.
-        A, B, C = buf[3] / ρ, buf[7] / ρ, buf[19] / ρ
-        D, E, F = buf[5] / ρ, buf[11] / ρ, buf[13] / ρ
+        A, B, C = buf[3] * invρ, buf[7] * invρ, buf[19] * invρ
+        D, E, F = buf[5] * invρ, buf[11] * invρ, buf[13] * invρ
 
         for o in 0:2, n in 0:2, m in 0:2
             m + n + o >= 3 || continue
