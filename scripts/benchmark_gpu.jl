@@ -124,11 +124,15 @@ function main()
     ok || error("correctness checks failed — do not trust the timings below")
     println()
 
+    # Measure the ceiling rather than trusting a datasheet number: the 3060 Ti
+    # ships with both GDDR6 (448 GB/s) and GDDR6X (608 GB/s) memory.
+    bw = gpu_copy_bandwidth(Float32)
+    @printf("Measured copy bandwidth: %.0f GB/s\n\n", bw / 1e9)
+
     println("Throughput")
     @printf("%-9s %-16s %-6s %-12s %-10s %-12s\n",
             "precision", "operator", "n", "MLUPS", "roofline", "of roofline")
-    # 27 loads + 27 stores per node update; the card's own bandwidth sets the ceiling.
-    bw = 448e9    # RTX 3060 Ti, GB/s
+    # 27 loads + 27 stores per node update.
     for T in (Float32, Float64), operator in (:bgk, :central_moment), n in (64, 128, 192)
         bytes = 54 * sizeof(T)
         roof = bw / bytes / 1e6

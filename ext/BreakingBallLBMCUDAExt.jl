@@ -52,4 +52,31 @@ function BreakingBallLBM.gpu_run!(g::CuArray{T,4}, nsteps::Integer, τ::Real;
     return g
 end
 
+"""Plain copy, for measuring what bandwidth this card actually delivers."""
+function copy_kernel!(dst, src)
+    i = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
+    if i <= length(dst)
+        @inbounds dst[i] = src[i]
+    end
+    return nothing
+end
+
+function BreakingBallLBM.gpu_copy_bandwidth(::Type{T} = Float32; n = 64_000_000,
+                                            repeats = 20) where {T}
+    src = CUDA.zeros(T, n)
+    dst = CUDA.zeros(T, n)
+    threads = 256
+    blocks = cld(n, threads)
+    @cuda threads = threads blocks = blocks copy_kernel!(dst, src)   # warm up
+    CUDA.synchronize()
+    t = CUDA.@elapsed begin
+        for _ in 1:repeats
+            @cuda threads = threads blocks = blocks copy_kernel!(dst, src)
+        end
+    end
+    CUDA.unsafe_free!(src)
+    CUDA.unsafe_free!(dst)
+    return 2 * sizeof(T) * n * repeats / t     # bytes read + written, per second
+end
+
 end # module

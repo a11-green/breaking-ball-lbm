@@ -37,7 +37,7 @@ export LBMState, Lattice, D3Q19, D3Q27,
     collide!, collide_central_moments!, stream!, step!, run!, fluid_velocity,
     cube_velocity, cube_opposite, cube_weight, cube_equilibrium,
     to_cube_order!, from_cube_order!, aa_gather!, aa_scatter!, collide_buffer!,
-    aa_step_node!, aa_run!, gpu_run!, gpu_backend_loaded,
+    aa_step_node!, aa_run!, gpu_run!, gpu_copy_bandwidth, gpu_backend_loaded,
     Smagorinsky, total_relaxation_time, eddy_viscosity, nonequilibrium_flux_norm,
     strain_rate_magnitude,
     BounceBackLinks, build_links, solid_mask, refine_delta,
@@ -55,6 +55,15 @@ Advance an AA-pattern state held on the device. Defined by the CUDA extension,
 so it needs `using CUDA, StaticArrays` before it resolves.
 """
 function gpu_run! end
+
+"""
+    gpu_copy_bandwidth(T = Float32; n, repeats)
+
+Bytes per second a plain device-to-device copy sustains. The datasheet figure is
+not a safe stand-in — the same card ships with two memory types — so the
+benchmark measures the ceiling it is about to compare against.
+"""
+function gpu_copy_bandwidth end
 
 """Whether the CUDA extension has been loaded."""
 gpu_backend_loaded() = !isnothing(Base.get_extension(@__MODULE__, :BreakingBallLBMCUDAExt))
