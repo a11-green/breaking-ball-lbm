@@ -134,6 +134,7 @@ struct PitchRun{T<:AbstractFloat}
     substeps::Int
     control_time::T
     recut_drift::T
+    smagorinsky::T
     operator::Symbol
     rule::Symbol
     omega_bulk::T
@@ -143,7 +144,8 @@ end
 
 function PitchRun(units::LatticeUnits{T}, props::BallProperties{T};
                   substeps::Integer = 100, control_time::Real = 20 * substeps,
-                  recut_drift::Real = 0.25, operator::Symbol = :central_moment,
+                  recut_drift::Real = 0.25, smagorinsky::Real = 0.0,
+                  operator::Symbol = :central_moment,
                   rule::Symbol = :interpolated_local,
                   omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
                   gravity::NTuple{3,<:Real} = GRAVITY) where {T}
@@ -152,7 +154,8 @@ function PitchRun(units::LatticeUnits{T}, props::BallProperties{T};
     control_time > substeps ||
         throw(ArgumentError("control_time ($control_time) must exceed substeps ($substeps)"))
     return PitchRun{T}(units, props, Int(substeps), T(control_time), T(recut_drift),
-                       operator, rule, T(omega_bulk), T(omega_higher), T.(gravity))
+                       T(smagorinsky), operator, rule, T(omega_bulk), T(omega_higher),
+                       T.(gravity))
 end
 
 """
@@ -223,6 +226,7 @@ function couple_step!(g, run::PitchRun{T}, st::PitchState{T},
     F_lat, M_lat = advance_flow!(g, flow, run.substeps, u.τ;
                                  force = body, spin = spin_lat,
                                  operator = run.operator, rule = run.rule,
+                                 smagorinsky = run.smagorinsky,
                                  omega_bulk = run.omega_bulk,
                                  omega_higher = run.omega_higher)
 

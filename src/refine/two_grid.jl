@@ -354,7 +354,7 @@ is iterating the two levels to convergence within a cycle, for an error already
 below the scheme's own.
 """
 function refine_cycle!(rg::TwoGrid{T}; force::NTuple{3,<:Real} = (0, 0, 0),
-                       operator::Symbol = :central_moment,
+                       operator::Symbol = :central_moment, smagorinsky::Real = 0.0,
                        layers::Integer = 3, filtered::Bool = false,
                        omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
                        scratch = ntuple(_ -> Vector{T}(undef, 27), 3)) where {T}
@@ -363,10 +363,12 @@ function refine_cycle!(rg::TwoGrid{T}; force::NTuple{3,<:Real} = (0, 0, 0),
 
     save_coarse!(rg)
     aa_run!(rg.coarse, 2, rg.τc; force = Fc, operator = operator,
+            smagorinsky = smagorinsky,
             omega_bulk = omega_bulk, omega_higher = omega_higher)
 
     for half in 1:2
         aa_run!(rg.fine, 2, rg.τf; force = Ff, operator = operator,
+                smagorinsky = smagorinsky,
                 omega_bulk = omega_bulk, omega_higher = omega_higher)
         interface_fill!(rg, half / 2; layers = layers, scratch = scratch)
     end

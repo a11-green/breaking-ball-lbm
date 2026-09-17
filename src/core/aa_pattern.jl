@@ -158,7 +158,7 @@ GPU kernel call — so the device runs code the analytic benchmarks have already
 checked on the host.
 """
 @inline function collide_buffer!(buf, τ::T, force::NTuple{3,T}, ::Val{OP},
-                                 ωb::T, ωh::T) where {T,OP}
+                                 ωb::T, ωh::T, smag::T = zero(T)) where {T,OP}
     ρ = zero(T)
     mx = zero(T)
     my = zero(T)
@@ -176,12 +176,43 @@ checked on the host.
     uy = (my + force[2] / 2) * invρ
     uz = (mz + force[3] / 2) * invρ
 
+    # Subgrid viscosity, node-local (§3.1). `smag` is the Smagorinsky constant
+    # and zero switches the model off, which is a branch every thread in a warp
+    # takes together — the whole domain is one way or the other.
+    ω = one(T) / τ
+    if smag > 0
+        pxx = zero(T); pyy = zero(T); pzz = zero(T)
+        pxy = zero(T); pxz = zero(T); pyz = zero(T)
+        Base.Cartesian.@nexprs 27 s -> begin
+            @inbounds fq_s = buf[s]
+            cv_s = cube_velocity(s)
+            cx_s = T(cv_s[1]); cy_s = T(cv_s[2]); cz_s = T(cv_s[3])
+            pxx += cx_s * cx_s * fq_s
+            pyy += cy_s * cy_s * fq_s
+            pzz += cz_s * cz_s * fq_s
+            pxy += cx_s * cy_s * fq_s
+            pxz += cx_s * cz_s * fq_s
+            pyz += cy_s * cz_s * fq_s
+        end
+        # Π^neq = Σ c c f − ρ c_s² δ − ρ u u: the equilibrium's second moment
+        # written out, so no equilibrium has to be evaluated for this.
+        ρcs2 = ρ * T(CS2)
+        pxx -= ρcs2 + ρ * ux * ux
+        pyy -= ρcs2 + ρ * uy * uy
+        pzz -= ρcs2 + ρ * uz * uz
+        pxy -= ρ * ux * uy
+        pxz -= ρ * ux * uz
+        pyz -= ρ * uy * uz
+        Πnorm = sqrt(pxx * pxx + pyy * pyy + pzz * pzz +
+                     2 * (pxy * pxy + pxz * pxz + pyz * pyz))
+        ω = one(T) / total_relaxation_time(Smagorinsky{T}(smag, one(T)), τ, ρ, Πnorm)
+    end
+
     if OP === :central_moment
         to_moments!(buf, ux, uy, uz)
-        relax_moments!(buf, ρ, one(T) / τ, force, ωb, ωh)
+        relax_moments!(buf, ρ, ω, force, ωb, ωh)
         to_populations!(buf, ux, uy, uz)
     else
-        ω = one(T) / τ
         pre = one(T) - ω / 2
         # Everything independent of the direction, computed once.
         usq_term = one(T) - T(HALF_INV_CS2) * (ux * ux + uy * uy + uz * uz)
@@ -213,9 +244,10 @@ One AA-pattern time step for a single node: gather, collide, scatter.
 """
 @inline function aa_step_node!(g, buf, even::Bool, i::Int, j::Int, k::Int,
                                nx::Int, ny::Int, nz::Int, τ::T, force::NTuple{3,T},
-                               operator::Val, ωb::T, ωh::T) where {T}
+                               operator::Val, ωb::T, ωh::T,
+                               smag::T = zero(T)) where {T}
     aa_gather!(buf, g, even, i, j, k, nx, ny, nz)
-    collide_buffer!(buf, τ, force, operator, ωb, ωh)
+    collide_buffer!(buf, τ, force, operator, ωb, ωh, smag)
     aa_scatter!(g, buf, even, i, j, k, nx, ny, nz)
     return nothing
 end
@@ -229,6 +261,7 @@ leaves the array in normal orientation.
 """
 function aa_run!(g::Array{T,4}, nsteps::Integer, τ::Real;
                  force::NTuple{3,<:Real} = (0, 0, 0), operator::Symbol = :central_moment,
+                 smagorinsky::Real = 0.0,
                  omega_bulk::Real = 1.0, omega_higher::Real = 1.0) where {T}
     iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
     nx, ny, nz = size(g, 1), size(g, 2), size(g, 3)
@@ -239,7 +272,7 @@ function aa_run!(g::Array{T,4}, nsteps::Integer, τ::Real;
         even = isodd(n)          # the first step of each pair is the "even" pattern
         for k in 1:nz, j in 1:ny, i in 1:nx
             aa_step_node!(g, buf, even, i, j, k, nx, ny, nz, T(τ), F,
-                          op, T(omega_bulk), T(omega_higher))
+                          op, T(omega_bulk), T(omega_higher), T(smagorinsky))
         end
     end
     return g

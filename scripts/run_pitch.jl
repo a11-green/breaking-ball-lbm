@@ -80,6 +80,8 @@ function parse_args(args)
               --refine F           refine a box of F diameters around the ball to 2x
                                    (§6.5.1 — the only way to get a seam worth the
                                    name in an eight-diameter domain; at least 3)
+              --smagorinsky C      subgrid constant, 0 to rely on the operator's own
+                                   dissipation (default $(c.smagorinsky))
               --cpu                force the host path even if a GPU is present
               --out FILE           trajectory CSV (default $(c.out))
             Coordinates: x toward the plate, z up, y to the pitcher's left.""")
@@ -100,6 +102,7 @@ function parse_args(args)
         elseif a == "--spinup";     c.spinup = parse(Int, take())
         elseif a == "--spinup-flowthroughs"; c.spinup_flowthroughs = parse(Float64, take())
         elseif a == "--refine";     c.refine = parse(Float64, take())
+        elseif a == "--smagorinsky"; c.smagorinsky = parse(Float64, take())
         elseif a == "--cpu";        c.device = false
         elseif a == "--out";        c.out = take()
         else
@@ -130,6 +133,9 @@ function plan(c::PitchConfig)
             budget.dx_mm, budget.seam_cells, budget.boundary_layer_cells)
     @printf("Lattice     tau - 1/2 = %.2e, Ma = %.3f, Re = %.3e\n",
             units.τ - 0.5, mach_number(units), lattice_reynolds(units))
+    @printf("Subgrid     %s\n", c.smagorinsky > 0 ?
+            @sprintf("Smagorinsky C_s = %.2f", c.smagorinsky) :
+            "none — the collision operator's own dissipation only")
     @printf("Blockage    sphere radius is %.3f of the box edge\n", budget.blockage)
     if c.refine > 0
         fine_budget = grid_budget(; nodes_per_diameter = 2 * c.resolution,
@@ -191,7 +197,8 @@ function main(args)
     end
     nsub = min(max_substeps(flow, spin_lat, c.recut_drift), 100)
     run = PitchRun(units, props; substeps = nsub, control_time = 40 * nsub,
-                   recut_drift = c.recut_drift, operator = c.operator, rule = c.rule)
+                   recut_drift = c.recut_drift, smagorinsky = c.smagorinsky,
+                   operator = c.operator, rule = c.rule)
 
     flowthrough = edge / units.lattice_speed            # steps for the box to convect once
     spinup = c.spinup > 0 ? c.spinup :

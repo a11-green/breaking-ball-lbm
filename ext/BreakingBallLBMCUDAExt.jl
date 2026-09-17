@@ -16,7 +16,7 @@ using StaticArrays
 const BBL = BreakingBallLBM
 
 function aa_kernel!(g, even::Bool, nx::Int, ny::Int, nz::Int, τ::T,
-                    force::NTuple{3,T}, op::Val, ωb::T, ωh::T) where {T}
+                    force::NTuple{3,T}, op::Val, ωb::T, ωh::T, smag::T) where {T}
     idx = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
         t = Int(idx) - 1
@@ -24,7 +24,7 @@ function aa_kernel!(g, even::Bool, nx::Int, ny::Int, nz::Int, τ::T,
         j = (t ÷ nx) % ny + 1
         k = t ÷ (nx * ny) + 1
         buf = MVector{27,T}(undef)
-        BBL.aa_step_node!(g, buf, even, i, j, k, nx, ny, nz, τ, force, op, ωb, ωh)
+        BBL.aa_step_node!(g, buf, even, i, j, k, nx, ny, nz, τ, force, op, ωb, ωh, smag)
     end
     return nothing
 end
@@ -32,6 +32,7 @@ end
 function BreakingBallLBM.gpu_run!(g::CuArray{T,4}, nsteps::Integer, τ::Real;
                                   force::NTuple{3,<:Real} = (0, 0, 0),
                                   operator::Symbol = :central_moment,
+                                  smagorinsky::Real = 0.0,
                                   omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
                                   threads::Int = 128) where {T}
     iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
@@ -43,11 +44,12 @@ function BreakingBallLBM.gpu_run!(g::CuArray{T,4}, nsteps::Integer, τ::Real;
     F = T.(force)
     op = Val(operator)
     τT, ωbT, ωhT = T(τ), T(omega_bulk), T(omega_higher)
+    smagT = T(smagorinsky)
 
     for step in 1:nsteps
         even = isodd(step)
         @cuda threads = threads blocks = blocks aa_kernel!(g, even, nx, ny, nz, τT,
-                                                           F, op, ωbT, ωhT)
+                                                           F, op, ωbT, ωhT, smagT)
     end
     return g
 end
@@ -111,7 +113,7 @@ race-free for the same reason overwriting is: one thread owns the column.
 function aa_wall_kernel!(g, contrib, even::Bool, nx::Int, ny::Int, nz::Int, τ::T,
                          force::NTuple{3,T}, op::Val, ωb::T, ωh::T,
                          kind, deltas, center::NTuple{3,T}, spin::NTuple{3,T},
-                         halfway::Bool, ::Val{ACC}) where {T,ACC}
+                         halfway::Bool, smag::T, ::Val{ACC}) where {T,ACC}
     idx = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
         t = Int(idx) - 1
@@ -120,7 +122,8 @@ function aa_wall_kernel!(g, contrib, even::Bool, nx::Int, ny::Int, nz::Int, τ::
         k = t ÷ (nx * ny) + 1
         buf = MVector{27,T}(undef)
         F, M = BBL.aa_step_node_walls!(g, buf, even, i, j, k, nx, ny, nz, τ, force,
-                                       op, ωb, ωh, kind, deltas, center, spin, halfway)
+                                       op, ωb, ωh, kind, deltas, center, spin, halfway,
+                                       smag)
         @inbounds b = kind[i, j, k]
         if b > Int32(0)
             if ACC
@@ -155,6 +158,7 @@ function BreakingBallLBM.gpu_run_walls!(g::CuArray{T,4}, wall::BBL.WallField,
                                         operator::Symbol = :central_moment,
                                         rule::Symbol = :interpolated_local,
                                         reduction::Symbol = :last,
+                                        smagorinsky::Real = 0.0,
                                         omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
                                         threads::Int = 128) where {T}
     iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
@@ -181,7 +185,7 @@ function BreakingBallLBM.gpu_run_walls!(g::CuArray{T,4}, wall::BBL.WallField,
         even = isodd(step)
         @cuda threads = threads blocks = blocks aa_wall_kernel!(
             g, contrib, even, nx, ny, nz, τT, F, op, ωbT, ωhT,
-            wall.kind, wall.deltas, center, ω, halfway, acc)
+            wall.kind, wall.deltas, center, ω, halfway, T(smagorinsky), acc)
     end
 
     total = Array(sum(contrib; dims = 2))
@@ -597,6 +601,7 @@ function BreakingBallLBM.advance_flow!(dg::DeviceTwoGrid{T}, drf::DeviceRefinedF
                                        spin::NTuple{3,<:Real} = (0, 0, 0),
                                        operator::Symbol = :central_moment,
                                        rule::Symbol = :interpolated_local,
+                                       smagorinsky::Real = 0.0,
                                        omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
                                        threads::Int = 128) where {T}
     iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
@@ -612,6 +617,7 @@ function BreakingBallLBM.advance_flow!(dg::DeviceTwoGrid{T}, drf::DeviceRefinedF
     for _ in 1:cycles
         BreakingBallLBM.save_coarse!(dg)
         BreakingBallLBM.gpu_run!(dg.coarse, 2, dg.τc; force = Fc, operator = operator,
+                                 smagorinsky = smagorinsky,
                                  omega_bulk = omega_bulk, omega_higher = omega_higher,
                                  threads = threads)
         for half in 1:2
@@ -620,6 +626,7 @@ function BreakingBallLBM.advance_flow!(dg::DeviceTwoGrid{T}, drf::DeviceRefinedF
                                                   force = Ff, spin = ωf,
                                                   operator = operator, rule = rule,
                                                   reduction = :mean,
+                                                  smagorinsky = smagorinsky,
                                                   omega_bulk = omega_bulk,
                                                   omega_higher = omega_higher,
                                                   threads = threads)

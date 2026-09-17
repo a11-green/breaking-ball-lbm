@@ -124,6 +124,7 @@ function refine_cycle_walls!(rg::TwoGrid{T}, wall::RotatingWall{T};
                              spin::NTuple{3,<:Real} = (0, 0, 0),
                              operator::Symbol = :central_moment,
                              rule::Symbol = :interpolated_local,
+                             smagorinsky::Real = 0.0,
                              layers::Integer = 3, filtered::Bool = false,
                              omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
                              scratch = ntuple(_ -> Vector{T}(undef, 27), 3)) where {T}
@@ -133,6 +134,7 @@ function refine_cycle_walls!(rg::TwoGrid{T}, wall::RotatingWall{T};
 
     save_coarse!(rg)
     aa_run!(rg.coarse, 2, rg.τc; force = Fc, operator = operator,
+            smagorinsky = smagorinsky,
             omega_bulk = omega_bulk, omega_higher = omega_higher)
 
     sF = (zero(T), zero(T), zero(T))
@@ -140,6 +142,7 @@ function refine_cycle_walls!(rg::TwoGrid{T}, wall::RotatingWall{T};
     for half in 1:2
         F, M = aa_run_walls!(rg.fine, wall.wall, 2, rg.τf; force = Ff, spin = ωf,
                              operator = operator, rule = rule, reduction = :mean,
+                             smagorinsky = smagorinsky,
                              omega_bulk = omega_bulk, omega_higher = omega_higher)
         sF = sF .+ F
         sM = sM .+ M
@@ -161,7 +164,7 @@ function advance_flow!(rg::TwoGrid{T}, rf::RefinedFlow{T}, nsteps::Integer, τ::
                        force::NTuple{3,<:Real} = (0, 0, 0),
                        spin::NTuple{3,<:Real} = (0, 0, 0),
                        operator::Symbol = :central_moment,
-                       rule::Symbol = :interpolated_local,
+                       rule::Symbol = :interpolated_local, smagorinsky::Real = 0.0,
                        omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
                        layers::Integer = 3, filtered::Bool = false) where {T}
     iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
@@ -175,6 +178,7 @@ function advance_flow!(rg::TwoGrid{T}, rf::RefinedFlow{T}, nsteps::Integer, τ::
     for _ in 1:cycles
         F, M = refine_cycle_walls!(rg, rf.wall; force = force, spin = ωf,
                                    operator = operator, rule = rule,
+                                   smagorinsky = smagorinsky,
                                    layers = layers, filtered = filtered,
                                    omega_bulk = omega_bulk, omega_higher = omega_higher,
                                    scratch = scratch)

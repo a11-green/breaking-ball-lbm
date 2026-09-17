@@ -192,13 +192,14 @@ and contribute nothing.
                                      nx::Int, ny::Int, nz::Int, τ::T,
                                      force::NTuple{3,T}, operator::Val, ωb::T, ωh::T,
                                      kind, deltas, center::NTuple{3,T},
-                                     spin::NTuple{3,T}, halfway::Bool) where {T}
+                                     spin::NTuple{3,T}, halfway::Bool,
+                                     smag::T = zero(T)) where {T}
     @inbounds b = kind[i, j, k]
     zero3 = (zero(T), zero(T), zero(T))
     b == SOLID_NODE && return zero3, zero3
 
     aa_gather!(buf, g, even, i, j, k, nx, ny, nz)
-    collide_buffer!(buf, τ, force, operator, ωb, ωh)
+    collide_buffer!(buf, τ, force, operator, ωb, ωh, smag)
     if b == Int32(0)
         aa_scatter!(g, buf, even, i, j, k, nx, ny, nz)
         return zero3, zero3
@@ -225,7 +226,7 @@ function aa_run_walls!(g::Array{T,4}, wall::WallField{T}, nsteps::Integer, τ::R
                        operator::Symbol = :central_moment,
                        spin::NTuple{3,<:Real} = (0, 0, 0),
                        rule::Symbol = :interpolated_local,
-                       reduction::Symbol = :last,
+                       reduction::Symbol = :last, smagorinsky::Real = 0.0,
                        omega_bulk::Real = 1.0, omega_higher::Real = 1.0) where {T}
     iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
     rule in (:interpolated_local, :halfway) ||
@@ -251,7 +252,8 @@ function aa_run_walls!(g::Array{T,4}, wall::WallField{T}, nsteps::Integer, τ::R
         for k in 1:nz, j in 1:ny, i in 1:nx
             f, t = aa_step_node_walls!(g, buf, even, i, j, k, nx, ny, nz, T(τ), F, op,
                                        T(omega_bulk), T(omega_higher),
-                                       wall.kind, wall.deltas, wall.center, ω, halfway)
+                                       wall.kind, wall.deltas, wall.center, ω, halfway,
+                                       T(smagorinsky))
             total_force = total_force .+ f
             total_torque = total_torque .+ t
         end
