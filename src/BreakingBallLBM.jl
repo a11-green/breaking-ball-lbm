@@ -35,6 +35,7 @@ include("trajectory/aero_model.jl")
 include("trajectory/trajectory.jl")
 include("trajectory/coupling.jl")
 include("refine/two_grid.jl")
+include("postprocess/fields.jl")
 include("refine/refined_flow.jl")
 include("validation/sphere_array.jl")
 
@@ -67,6 +68,8 @@ export LBMState, Lattice, D3Q19, D3Q27,
     TwoGrid, fine_tau, neq_rescale, fine_force, grid_sizes,
     interface_fill!, restrict!, save_coarse!, refine_cycle!,
     init_refined!, level_macroscopic, node_macroscopic,
+    velocity_field, density_field, magnitude, velocity_gradient,
+    vorticity, q_criterion, field_limits, slice_field,
     interface_nodes, fill_interface_node!, restrict_node!, coarse_span,
     RefinedFlow, refine_cycle_walls!, coarse_force, coarse_torque,
     refresh_coarse_solid!, init_refined_flow!,
