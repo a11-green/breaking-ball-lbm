@@ -130,6 +130,35 @@ function check_walls(::Type{T}; n = 20, radius = 5.0, steps = 6,
 end
 
 """
+Does the open boundary agree between host and device?
+
+The buffer is written by a face kernel rather than by the streaming one, so it
+is the one place where an index convention could differ between the two
+backends without any other check noticing.
+"""
+function check_open(::Type{T}; n = 24, steps = 20) where {T}
+    dims = (n, 8, 8)
+    τ = T(0.6)
+    s = LBMState{T}(dims..., τ; lattice = D3Q27())
+    init_equilibrium!(s, (i, j, k) -> (1.0 + 0.003sin(i + 2j), -0.05 + 0.01cos(i),
+                                       0.004sin(j), 0.0))
+    g_cpu = to_cube_order!(similar(s.f), s.f)
+    g_gpu = CuArray(copy(g_cpu))
+
+    ch = OpenChannel{T}()
+    inlet = (T(-0.05), T(0), T(0))
+    aa_run!(g_cpu, steps, τ; channel = ch, inlet = inlet)
+    gpu_run!(g_gpu, steps, τ; channel = ch, inlet = inlet)
+
+    err = maximum(abs.(Array(g_gpu) .- g_cpu)) / maximum(abs.(g_cpu))
+    tol = T === Float32 ? 1e-4 : 1e-11
+    ok = err < tol
+    @printf("  %-8s inflow/outflow: max relative difference vs CPU: %.3e  %s\n",
+            T, err, ok ? "OK" : "FAILED")
+    return ok
+end
+
+"""
 Does the whole coupled loop agree between host and device?
 
 This is the strongest check in the file, because it exercises everything at
@@ -417,6 +446,9 @@ function main()
     end
     for T in (Float64, Float32), rule in (:halfway, :interpolated_local)
         ok &= check_walls(T; rule = rule)
+    end
+    for T in (Float64, Float32)
+        ok &= check_open(T)
     end
     for T in (Float64, Float32)
         ok &= check_coupling(T)

@@ -262,7 +262,8 @@ leaves the array in normal orientation.
 function aa_run!(g::Array{T,4}, nsteps::Integer, τ::Real;
                  force::NTuple{3,<:Real} = (0, 0, 0), operator::Symbol = :central_moment,
                  smagorinsky::Real = 0.0,
-                 omega_bulk::Real = 1.0, omega_higher::Real = 1.0) where {T}
+                 omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
+                 channel = nothing, inlet::NTuple{3,<:Real} = (0, 0, 0)) where {T}
     iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
     nx, ny, nz = size(g, 1), size(g, 2), size(g, 3)
     buf = Vector{T}(undef, 27)
@@ -273,6 +274,11 @@ function aa_run!(g::Array{T,4}, nsteps::Integer, τ::Real;
         for k in 1:nz, j in 1:ny, i in 1:nx
             aa_step_node!(g, buf, even, i, j, k, nx, ny, nz, T(τ), F,
                           op, T(omega_bulk), T(omega_higher), T(smagorinsky))
+        end
+        # See `OpenChannel`: the even layout is the only one where a node's
+        # populations are its own, so the faces are imposed once per pair.
+        if channel !== nothing && iseven(n)
+            apply_open!(g, channel, inlet)
         end
     end
     return g

@@ -34,6 +34,8 @@ function BreakingBallLBM.gpu_run!(g::CuArray{T,4}, nsteps::Integer, τ::Real;
                                   operator::Symbol = :central_moment,
                                   smagorinsky::Real = 0.0,
                                   omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
+                                  channel = nothing,
+                                  inlet::NTuple{3,<:Real} = (0, 0, 0),
                                   threads::Int = 128) where {T}
     iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
     size(g, 4) == 27 || throw(ArgumentError("expected 27 cube slots, got $(size(g, 4))"))
@@ -50,6 +52,9 @@ function BreakingBallLBM.gpu_run!(g::CuArray{T,4}, nsteps::Integer, τ::Real;
         even = isodd(step)
         @cuda threads = threads blocks = blocks aa_kernel!(g, even, nx, ny, nz, τT,
                                                            F, op, ωbT, ωhT, smagT)
+        if channel !== nothing && iseven(step)
+            BreakingBallLBM.apply_open!(g, channel, inlet)
+        end
     end
     return g
 end
@@ -160,6 +165,8 @@ function BreakingBallLBM.gpu_run_walls!(g::CuArray{T,4}, wall::BBL.WallField,
                                         reduction::Symbol = :last,
                                         smagorinsky::Real = 0.0,
                                         omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
+                                        channel = nothing,
+                                        inlet::NTuple{3,<:Real} = (0, 0, 0),
                                         threads::Int = 128) where {T}
     iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
     size(g, 4) == 27 || throw(ArgumentError("expected 27 cube slots, got $(size(g, 4))"))
@@ -186,6 +193,9 @@ function BreakingBallLBM.gpu_run_walls!(g::CuArray{T,4}, wall::BBL.WallField,
         @cuda threads = threads blocks = blocks aa_wall_kernel!(
             g, contrib, even, nx, ny, nz, τT, F, op, ωbT, ωhT,
             wall.kind, wall.deltas, center, ω, halfway, T(smagorinsky), acc)
+        if channel !== nothing && iseven(step)
+            BreakingBallLBM.apply_open!(g, channel, inlet)
+        end
     end
 
     total = Array(sum(contrib; dims = 2))
@@ -307,6 +317,47 @@ function BreakingBallLBM.region_mean_velocity(g::CuArray{T,4}, weight::CuArray{T
     return T(ρ / wtot), (T((mx + half * Float64(force[1])) / ρ),
                          T((my + half * Float64(force[2])) / ρ),
                          T((mz + half * Float64(force[3])) / ρ))
+end
+
+# --- inflow and outflow ----------------------------------------------------
+
+"""
+One thread per lateral node, walking the buffer at both ends.
+
+The work is two planes of a face, not a volume, so this is a rounding error
+beside the collision kernel — at the production grid it is `ny*nz` threads
+against `nx*ny*nz`. It is called once per pair of steps, from inside the run
+loop, because that is the only layout where a node's populations are its own
+(see `OpenChannel`).
+"""
+function open_kernel!(g, ny::Int, nz::Int, nx::Int, depth::Int, isrc::Int, osrc::Int,
+                      ρref::T, ux::T, uy::T, uz::T) where {T}
+    idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    idx > ny * nz && return nothing
+    j = (idx - 1) % ny + 1
+    k = (idx - 1) ÷ ny + 1
+    u = (ux, uy, uz)
+    for m in 0:(depth - 1)
+        BBL.open_node!(g, nx - m, isrc, j, k, T, ρref, u, true)
+        BBL.open_node!(g, 1 + m, osrc, j, k, T, ρref, u, false)
+    end
+    return nothing
+end
+
+"""Device twin of the host `apply_open!`, sharing the per-node function with it."""
+function BreakingBallLBM.apply_open!(g::CuArray{T,4}, ch::BBL.OpenChannel{T},
+                                     u_in::NTuple{3,<:Real};
+                                     threads::Int = 128) where {T}
+    nx, ny, nz = size(g, 1), size(g, 2), size(g, 3)
+    nx >= 2 * ch.depth + 2 ||
+        throw(ArgumentError("a box of $nx planes cannot hold two buffers of $(ch.depth)"))
+    u_in[1] <= 0 ||
+        throw(ArgumentError("the stream runs along -x, so u_in[1] must not be positive; got $(u_in[1])"))
+    blocks = cld(ny * nz, threads)
+    @cuda threads = threads blocks = blocks open_kernel!(
+        g, ny, nz, nx, ch.depth, BBL.inlet_source(ch, nx), BBL.outlet_source(ch, nx),
+        ch.ρ_ref, T(u_in[1]), T(u_in[2]), T(u_in[3]))
+    return g
 end
 
 """

@@ -9,6 +9,7 @@ const BBL = BreakingBallLBM
     include("test_geometry.jl")
     include("test_rotating.jl")
     include("test_boundary.jl")
+    include("test_open.jl")
     include("test_central_moments.jl")
     include("test_aa_pattern.jl")
     include("test_aa_walls.jl")

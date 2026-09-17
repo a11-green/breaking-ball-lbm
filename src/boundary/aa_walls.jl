@@ -227,7 +227,9 @@ function aa_run_walls!(g::Array{T,4}, wall::WallField{T}, nsteps::Integer, τ::R
                        spin::NTuple{3,<:Real} = (0, 0, 0),
                        rule::Symbol = :interpolated_local,
                        reduction::Symbol = :last, smagorinsky::Real = 0.0,
-                       omega_bulk::Real = 1.0, omega_higher::Real = 1.0) where {T}
+                       omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
+                       channel = nothing,
+                       inlet::NTuple{3,<:Real} = (0, 0, 0)) where {T}
     iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
     rule in (:interpolated_local, :halfway) ||
         throw(ArgumentError("rule must be :interpolated_local or :halfway, got $rule"))
@@ -259,6 +261,12 @@ function aa_run_walls!(g::Array{T,4}, wall::WallField{T}, nsteps::Integer, τ::R
         end
         sum_force = sum_force .+ total_force
         sum_torque = sum_torque .+ total_torque
+        # Only on the even layout, which is where an even step leaves the array
+        # — and every even step, because the buffer is only as deep as two
+        # steps of wrap.
+        if channel !== nothing && iseven(n)
+            apply_open!(g, channel, inlet)
+        end
     end
     reduction === :mean && return sum_force ./ nsteps, sum_torque ./ nsteps
     return total_force, total_torque
