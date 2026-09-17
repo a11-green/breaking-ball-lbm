@@ -52,12 +52,36 @@ Hold a uniform stream past a fixed smooth sphere and time-average the drag.
 The stream is held by the same PI controller the coupled loop uses: a periodic
 box has nowhere to put the momentum the sphere removes, so without one the free
 stream decays and the Reynolds number drifts through the run.
+
+**The coefficient is normalised by the measured box mean, not by the velocity
+asked for.** The first version of this script used the target, and the low
+Reynolds numbers then came out at two thirds of the reference and refused to move
+when the resolution doubled — a systematic error, not a resolution one. The
+controller had not settled: its time constant was ten flow-through times and the
+run was four, so the stream never reached the target and `F/(½ρu_target²A)`
+divided a force built on the real velocity by a dynamic pressure built on a
+larger one. Normalising by what the flow actually did removes the dependence on
+the controller converging at all, and the box mean is the right velocity anyway —
+it is the superficial velocity, which is what a periodic array's drag is defined
+against.
+
+**Each case runs until it stops changing, rather than for a fixed time.** The
+drag settles slowly here and how slowly is not obvious in advance: in a periodic
+box the sphere sits in its own wake, so the controller holds the box *mean* at
+the target while the velocity actually approaching the sphere keeps falling as
+the wake fills the box, and the coefficient drifts downward for tens of
+flow-through times. On a small box it took sixty-four of them to reach a tenth
+of a percent — and a fixed-length run either wastes most of that on the cases
+that settle early or reports an unconverged number for the ones that do not. So
+the run is windowed, the drift between consecutive windows is the stopping test,
+and it is reported: a case that hit the cap without settling says so in that
+column rather than looking like the others.
 """
 function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
                    smagorinsky::Real = 0.0, operator::Symbol = :central_moment,
-                   lattice_speed::Real = 0.05, flowthroughs::Real = 8,
-                   sample_fraction::Real = 0.5, chunk::Integer = 20,
-                   device::Bool = HAS_CUDA) where {T}
+                   lattice_speed::Real = 0.05, window::Real = 4,
+                   max_flowthroughs::Real = 80, tolerance::Real = 0.01,
+                   chunk::Integer = 20, device::Bool = HAS_CUDA) where {T}
     N = Int(resolution)
     edge = round(Int, N * domain)
     R = T(N) / 2
@@ -83,61 +107,81 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
         flow = gpu_flow(wall)
     end
 
-    steps = round(Int, flowthroughs * edge / u)
-    steps += steps % (2chunk)
-    sample_from = round(Int, (1 - sample_fraction) * steps)
-    Tc = T(10 * edge / u)                 # controller time constant: ten flow-throughs
+    per_window = round(Int, window * edge / u)
+    per_window += per_window % (2chunk)
+    max_windows = max(2, ceil(Int, max_flowthroughs / window))
+    Tc = T(2 * edge / u)                  # controller: two flow-throughs
 
     target = (-u, zero(T), zero(T))
     control = (zero(T), zero(T), zero(T))
     integral = (zero(T), zero(T), zero(T))
-    sumF = (zero(T), zero(T), zero(T))
-    nsample = 0
+    q0 = T(0.5) * T(π) * R^2
+    prev = T(NaN)
+    CD = T(NaN); CL = T(NaN); Ū = u; drift = T(NaN)
     done = 0
+    windows = 0
     t0 = time()
 
-    while done < steps
-        ρ̄, ū = device ? flow_mean_velocity(g, flow, control) :
-                        mean_fluid_velocity(g, wall, control)
-        e = target .- ū
-        integral = integral .+ e .* chunk
-        control = (2 / Tc) .* e .+ (1 / Tc^2) .* integral
+    while windows < max_windows
+        sumF = (zero(T), zero(T), zero(T))
+        sumU = zero(T)
+        n = 0
+        while n * chunk < per_window
+            ρ̄, ū = device ? flow_mean_velocity(g, flow, control) :
+                            mean_fluid_velocity(g, wall, control)
+            e = target .- ū
+            integral = integral .+ e .* chunk
+            control = (2 / Tc) .* e .+ (1 / Tc^2) .* integral
 
-        F, _ = device ?
-            gpu_run_walls!(g, flow.wall, flow.contrib, chunk, τ; force = control,
-                           operator = operator, reduction = :mean,
-                           smagorinsky = smagorinsky) :
-            aa_run_walls!(g, wall, chunk, τ; force = control, operator = operator,
-                          reduction = :mean, smagorinsky = smagorinsky)
-        done += chunk
-        if done > sample_from
+            F, _ = device ?
+                gpu_run_walls!(g, flow.wall, flow.contrib, chunk, τ; force = control,
+                               operator = operator, reduction = :mean,
+                               smagorinsky = smagorinsky) :
+                aa_run_walls!(g, wall, chunk, τ; force = control, operator = operator,
+                              reduction = :mean, smagorinsky = smagorinsky)
+            all(isfinite, F) || return (CD = T(NaN), CL = T(NaN), τ = τ, Re = T(NaN),
+                                        deficit = T(NaN), drift = T(NaN),
+                                        flowthroughs = done * u / edge, steps = done,
+                                        seconds = time() - t0, diverged = true)
             sumF = sumF .+ F
-            nsample += 1
+            sumU += -ū[1]                 # the stream runs along -x
+            n += 1
+            done += chunk
         end
-        all(isfinite, F) || return (CD = NaN, CL = NaN, τ = τ, steps = done,
-                                    seconds = time() - t0, diverged = true)
+
+        Ū = sumU / n
+        F̄ = sumF ./ n
+        q = T(0.5) * Ū^2 * T(π) * R^2     # rho = 1
+        CD = -F̄[1] / q
+        CL = sqrt(F̄[2]^2 + F̄[3]^2) / q
+        windows += 1
+        drift = isnan(prev) || CD == 0 ? T(NaN) : (CD - prev) / CD
+        prev = CD
+        windows >= 2 && abs(drift) < tolerance && break
     end
 
-    F̄ = sumF ./ nsample
-    q = T(0.5) * u^2 * T(π) * R^2         # rho = 1
-    return (CD = -F̄[1] / q, CL = sqrt(F̄[2]^2 + F̄[3]^2) / q, τ = τ,
-            steps = done, seconds = time() - t0, diverged = false)
+    return (CD = CD, CL = CL, τ = τ, Re = Ū * 2R / ν, deficit = 1 - Ū / u,
+            drift = drift, flowthroughs = done * u / edge, steps = done,
+            seconds = time() - t0, diverged = false)
 end
 
 function sweep(label, cases; kwargs...)
     println(label)
-    @printf("%-9s %-5s %-6s %-11s %-9s %-9s %-9s %-7s %-6s\n",
-            "Re", "N/D", "C_s", "tau-1/2", "C_D", "reference", "ratio", "C_L", "s")
+    @printf("%-9s %-5s %-6s %-10s %-9s %-9s %-7s %-9s %-6s %-6s\n",
+            "Re asked", "N/D", "C_s", "Re got", "C_D", "reference", "ratio", "drift",
+            "f-thru", "s")
     for (Re, N, cs) in cases
         try
             r = drag_case(Float32; Re = Re, resolution = N, smagorinsky = cs, kwargs...)
-            ref = clift_gauvin(Re)
+            # The reference is evaluated at the Reynolds number the run achieved,
+            # not the one it was asked for.
+            ref = clift_gauvin(r.diverged ? Re : r.Re)
             if r.diverged
-                @printf("%-9.3g %-5d %-6.2f %-11.2e diverged after %d steps\n",
-                        Re, N, cs, r.τ - 0.5, r.steps)
+                @printf("%-9.3g %-5d %-6.2f diverged after %d steps\n", Re, N, cs, r.steps)
             else
-                @printf("%-9.3g %-5d %-6.2f %-11.2e %-9.3f %-9.3f %-9.2f %-7.3f %-6.0f\n",
-                        Re, N, cs, r.τ - 0.5, r.CD, ref, r.CD / ref, r.CL, r.seconds)
+                @printf("%-9.3g %-5d %-6.2f %-10.3g %-9.3f %-9.3f %-7.2f %+7.2f%%  %-6.0f %-6.0f\n",
+                        Re, N, cs, r.Re, r.CD, ref, r.CD / ref, 100 * r.drift,
+                        r.flowthroughs, r.seconds)
             end
         catch err
             @printf("%-9.3g %-5d %-6.2f skipped (%s)\n", Re, N, cs,
@@ -152,13 +196,14 @@ function main(args)
     quick = "--quick" in args
     device = !("--cpu" in args) && HAS_CUDA
     domain = quick ? 4.0 : 6.0
-    ft = quick ? 4.0 : 8.0
+    ft = quick ? 60.0 : 160.0             # a cap, not a run length
     println(device ? "Backend: CUDA" : "Backend: host")
     @printf("Domain: %.0f diameters (blockage: sphere radius is %.3f of the box edge)\n",
             domain, 0.5 / domain)
-    @printf("Averaging the last half of %.0f flow-through times\n\n", ft)
+    @printf("Each case runs until consecutive windows agree to 1%%, or gives up at %.0f\n", ft)
+    println("flow-through times and says so in the drift column.\n")
 
-    opts = (domain = domain, flowthroughs = ft, device = device)
+    opts = (domain = domain, max_flowthroughs = ft, device = device)
 
     # Where the drag curve is trustworthy and the flow is within reach: does the
     # answer converge, and to what?
@@ -174,12 +219,36 @@ function main(args)
                        for cs in (0.0, 0.16)];
           opts...)
 
+    # How much of what is left is the box rather than the sphere. The periodic
+    # images pull the drag up, and the wake deficit pulls the box mean down; both
+    # shrink as the domain grows, and neither is a property of the sphere.
+    println("Blockage — the same sphere in boxes of different size (Re = 1000, N/D = 20)")
+    @printf("%-9s %-10s %-9s %-9s %-9s %-8s %-7s\n",
+            "domain/D", "radius/L", "Re got", "C_D", "reference", "ratio", "drift")
+    for L in (3.0, 4.0, 6.0, 8.0)
+        try
+            r = drag_case(Float32; Re = 1000, resolution = 20, domain = L,
+                          max_flowthroughs = ft, device = device)
+            ref = clift_gauvin(r.Re)
+            @printf("%-9.1f %-10.3f %-9.4g %-9.3f %-9.3f %-8.2f %+.2f%%\n",
+                    L, 0.5 / L, r.Re, r.CD, ref, r.CD / ref, 100 * r.drift)
+        catch err
+            @printf("%-9.1f skipped (%s)\n", L, first(split(sprint(showerror, err), '\n')))
+        end
+        flush(stdout)
+    end
+    println()
+
     println("The reference is Clift-Gauvin, which is good to a few percent below the drag")
     println("crisis and meaningless through it — at 2e5 a real sphere's drag depends on the")
     println("free-stream turbulence of whoever measured it, which is exactly why a baseball")
     println("has seams and why this project resolves them rather than trusting a curve.")
     println()
-    println("What to read off: the resolution at which the ratio column settles near one,")
+    println("Read the drift column first: a case that gave up at the cap without settling")
+    println("shows it there, and its other columns mean nothing. The drag settles slowly")
+    println("because the sphere sits in its own wake.")
+    println()
+    println("Then: the resolution at which the ratio column settles near one,")
     println("and whether the Smagorinsky rows differ from their C_s = 0 neighbours. If they")
     println("do not, the operator's own dissipation is already doing the work and §3.1's")
     println("explicit model is redundant.")
