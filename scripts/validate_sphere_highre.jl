@@ -125,9 +125,15 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
                    lattice_speed::Union{Real,Nothing} = nothing,
                    tau::Union{Real,Nothing} = nothing, window::Real = 4,
                    max_settling::Real = 80, tolerance::Real = 0.01,
-                   chunk::Integer = 20, device::Bool = HAS_CUDA) where {T}
+                   chunk::Integer = 20, device::Bool = HAS_CUDA,
+                   channel::Bool = false, upstream::Real = 3, downstream::Real = 8) where {T}
     N = Int(resolution)
     edge = round(Int, N * domain)
+    # With an inlet and an outlet the box stops being a cube: the wake needs
+    # somewhere to go before the outlet, and the sphere needs room to disturb
+    # the stream before the inlet states it. `domain` still sets the lateral
+    # width, which is the blockage the open faces do *not* fix.
+    edge_x = channel ? round(Int, N * (upstream + downstream)) : edge
     R = T(N) / 2
 
     # Re = u N / nu ties the three together, so exactly one of tau and the
@@ -152,9 +158,17 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
     ma < 0.3 || error("the lattice Mach number would be $(round(ma, digits=3)) — " *
                       "lower tau or raise the resolution")
 
-    dims = (edge, edge, edge)
-    ϕ = sphere_sdf_field(T, dims, R)
-    wall = build_wall_field(ϕ; sdf_fn = sphere_sdf_fn(dims, R))
+    dims = (edge_x, edge, edge)
+    # The stream runs along -x, so upstream is the high-x end and that is where
+    # the inlet goes; the sphere sits `upstream` diameters below it.
+    cx = channel ? T(edge_x - round(Int, N * upstream)) : T(edge_x + 1) / 2
+    centre3 = (cx, T(edge + 1) / 2, T(edge + 1) / 2)
+    ϕ = sphere_sdf_field(T, dims, R; center = centre3)
+    wall = build_wall_field(ϕ; sdf_fn = sphere_sdf_fn(dims, R; center = centre3))
+    chan = channel ? OpenChannel{T}() : nothing
+    if channel && !open_is_clear(wall, chan)
+        error("the sphere reaches into a face buffer — raise `upstream`/`downstream`")
+    end
 
     # The disc that measures what arrives. The stream runs along -x, so upstream
     # is +x; the plane sits one and a half diameters that way, or at the antipode
@@ -165,11 +179,13 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
     # is wake. The disc is the frontal area, so it is the part of the profile the
     # sphere is actually in — and, being the deepest part of the deficit, a lower
     # bound on the stream the sphere responds to.
-    centre = (edge + 1) / 2
-    iapp = mod1(round(Int, centre) + min(round(Int, 3N ÷ 2), edge ÷ 2), edge)
+    lateral = T(edge + 1) / 2
+    iapp = channel ?
+        min(edge_x - 2 * chan.depth, round(Int, cx) + round(Int, 3N ÷ 2)) :
+        mod1(round(Int, cx) + min(round(Int, 3N ÷ 2), edge_x ÷ 2), edge_x)
     disc = zeros(T, dims)
     @inbounds for k in 1:edge, j in 1:edge
-        (T(j) - centre)^2 + (T(k) - centre)^2 <= R^2 || continue
+        (T(j) - lateral)^2 + (T(k) - lateral)^2 <= R^2 || continue
         wall.kind[iapp, j, k] == BreakingBallLBM.SOLID_NODE && continue
         disc[iapp, j, k] = one(T)
     end
@@ -191,11 +207,11 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
     # a creeping flow reaches steady state in L²/nu, which here is a seventh of
     # one flow-through, so counting windows in flow-throughs would run it a
     # hundred times longer than it needs. Take whichever is shorter.
-    settle = min(edge / u, edge^2 / ν)
+    settle = min(edge_x / u, edge^2 / ν)
     per_window = round(Int, window * settle)
     per_window += per_window % (2chunk)
     max_windows = max(3, ceil(Int, max_settling / window))
-    Tc = T(2 * edge / u)                  # controller: two flow-throughs
+    Tc = T(2 * edge_x / u)                # controller: two flow-throughs
     nfluid = T(count(!=(BreakingBallLBM.SOLID_NODE), wall.kind))
 
     target = (-u, zero(T), zero(T))
@@ -228,23 +244,32 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
             # low Reynolds number, where the drag is large, it cannot do so
             # inside any run worth waiting for: the creeping-flow check reached
             # a fifth of the velocity it was asked for and was still climbing.
-            e = target .- ū
-            integral = integral .+ e .* chunk
-            control = feedforward .+ (2 / Tc) .* e .+ (1 / Tc^2) .* integral
+            # With an inlet there is nothing for the controller to do: the
+            # stream is stated at the face rather than inferred from the box,
+            # which is the whole reason the inlet is worth having. The body
+            # force stays at zero and the momentum the sphere removes leaves
+            # through the outlet instead of having to be put back.
+            if !channel
+                e = target .- ū
+                integral = integral .+ e .* chunk
+                control = feedforward .+ (2 / Tc) .* e .+ (1 / Tc^2) .* integral
+            end
 
             F, _ = device ?
                 gpu_run_walls!(g, flow.wall, flow.contrib, chunk, τ; force = control,
                                operator = operator, reduction = :mean,
-                               smagorinsky = smagorinsky) :
+                               smagorinsky = smagorinsky, channel = chan,
+                               inlet = target) :
                 aa_run_walls!(g, wall, chunk, τ; force = control, operator = operator,
-                              reduction = :mean, smagorinsky = smagorinsky)
+                              reduction = :mean, smagorinsky = smagorinsky,
+                              channel = chan, inlet = target)
             all(isfinite, F) || return (CD = T(NaN), CL = T(NaN), τ = τ,
                                         Λ = (τ - T(0.5))^2, Ma = ma, u = u,
                                         Re = T(NaN),
                                         CD_app = T(NaN), Re_app = T(NaN),
                                         approach = T(NaN), U_app = T(NaN),
                                         deficit = T(NaN), drift = T(NaN),
-                                        flowthroughs = done * u / edge, windows = windows,
+                                        flowthroughs = done * u / edge_x, windows = windows,
                                         steps = done, seconds = time() - t0,
                                         diverged = true)
             sumF = sumF .+ F
@@ -258,7 +283,15 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
         Ū = sumU / n
         Ūa = sumUa / n
         F̄ = sumF ./ n
-        q = T(0.5) * Ū^2 * T(π) * R^2     # rho = 1
+        # **What the coefficient is divided by, and why it differs between the
+        # two configurations.** In a periodic box the only defensible reference
+        # is the box mean, because nothing states a free stream — that is the
+        # ambiguity this whole script is about. With an inlet the free stream is
+        # not inferred at all: it is the number handed to the face, exactly, and
+        # `u_in/U` then stops being a correction and becomes a check that the
+        # domain is long enough for the sphere to stop disturbing it.
+        Uref = channel ? u : Ū
+        q = T(0.5) * Uref^2 * T(π) * R^2  # rho = 1
         CD = -F̄[1] / q
         CL = sqrt(F̄[2]^2 + F̄[3]^2) / q
         windows += 1
@@ -280,11 +313,13 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
     # periodic box is the error and the sphere is fine.
     qa = T(0.5) * Ūa^2 * T(π) * R^2
     CDa = ndisc == 0 || Ūa == 0 ? T(NaN) : -last_force[1] / qa
+    Uref = channel ? u : Ū
     return (CD = CD, CL = CL, τ = τ, Λ = (τ - T(0.5))^2, Ma = ma, u = u,
-            Re = Ū * 2R / ν, deficit = 1 - Ū / u,
-            CD_app = CDa, Re_app = Ūa * 2R / ν, approach = Ūa / Ū, U_app = Ūa,
+            Re = Uref * 2R / ν, deficit = 1 - Ū / u,
+            CD_app = CDa, Re_app = Ūa * 2R / ν, approach = Ūa / Uref, U_app = Ūa,
             drift = drift, force = last_force, U = Ū, ν = ν, R = R, edge = edge,
-            flowthroughs = done * u / edge, windows = windows, steps = done,
+            edge_x = edge_x, channel = channel,
+            flowthroughs = done * u / edge_x, windows = windows, steps = done,
             seconds = time() - t0, diverged = false)
 end
 
@@ -399,6 +434,66 @@ function tau_sweep(; device = HAS_CUDA, Re = 100, domain = 4.0, max_settling = 6
     println()
 end
 
+"""
+The same sphere, the same Reynolds number, the box closed and opened.
+
+This is the measurement the rest of the script was arguing towards. With the
+faces periodic the coefficient's denominator is ambiguous between the box mean
+and the core disc, and the two only bracket the answer; with an inlet the free
+stream is the number handed to the face and there is nothing to bracket.
+`u_in/ref` then stops being a correction and becomes the check that matters: it
+is one when the sphere has stopped disturbing the stream by the time it reaches
+the disc, and short of one when the domain is too small — measured rather than
+assumed.
+"""
+function channel_check(; device = HAS_CUDA, domain = 4.0, max_settling = 60.0,
+                       resolution = 20, upstream = 3, downstream = 8,
+                       cases = (100, 1000, 1e4))
+    println("Closed against open — the same sphere, two boundary conditions")
+    # Where the disc sits decides what the check is worth. Too near the sphere
+    # and it reads the sphere's own blockage; too near the inlet and it reads
+    # the inlet, which would make a ratio near one circular.
+    @printf("Open rows: %.1f D of run-up and %.1f D of wake, with the approach disc 1.5 D\n",
+            upstream, downstream)
+    @printf("upstream of the sphere and %.1f D below the inlet.\n", upstream - 1.5)
+    @printf("%-9s %-14s %-7s %-8s %-8s %-9s %-7s %-9s %-8s %-6s\n",
+            "Re asked", "faces", "N/D", "planes", "C_D", "reference", "ratio",
+            "u_in/ref", "drift", "s")
+    for Re in cases, (name, open_faces) in (("periodic", false), ("inlet/outlet", true))
+        try
+            r = drag_case(Float32; Re = Re, resolution = resolution, domain = domain,
+                          lattice_speed = 0.05, max_settling = max_settling,
+                          device = device, channel = open_faces,
+                          upstream = upstream, downstream = downstream)
+            if r.diverged
+                @printf("%-9.3g %-14s %-7d diverged after %d steps\n",
+                        Re, name, resolution, r.steps)
+            else
+                ref = clift_gauvin(r.Re)
+                @printf("%-9.3g %-14s %-7d %-8d %-8.3f %-9.3f %-7.2f %-9.3f %+7.2f%% %-6.0f\n",
+                        Re, name, resolution, r.edge_x, r.CD, ref, r.CD / ref,
+                        r.approach, 100 * r.drift, r.seconds)
+            end
+        catch err
+            @printf("%-9.3g %-14s skipped (%s)\n", Re, name,
+                    first(split(sprint(showerror, err), '\n')))
+        end
+        flush(stdout)
+    end
+    println()
+    println("The periodic rows repeat what the sweeps above found. The open rows have no")
+    println("bracket to report: C_D is divided by the velocity stated at the inlet. If the")
+    println("ratio lands near one there while u_in/ref is also near one, the discrepancy")
+    println("was the box. If u_in/ref is short of one, the sphere is still disturbing the")
+    println("stream where the disc sits — a domain-size result, not a code one, and the")
+    println("number to grow the run-up against.")
+    println()
+    println("What an inlet does not fix: the lateral faces are still periodic, so the")
+    println("sphere still has images to the sides and the blockage they cause has to be")
+    println("bought with width. Nor is the outlet perfectly non-reflecting.")
+    println()
+end
+
 function main(args)
     quick = "--quick" in args
     device = !("--cpu" in args) && HAS_CUDA
@@ -413,6 +508,15 @@ function main(args)
     println("state on L²/nu, which can be a small fraction of one flow-through.\n")
 
     opts = (domain = domain, max_settling = ft, device = device)
+
+    # Iterating on the domain size is the whole activity once the faces are
+    # open, so it can be run on its own.
+    if "--open" in args
+        channel_check(; device = device, domain = domain, max_settling = ft,
+                      upstream = 3, downstream = quick ? 5 : 8,
+                      cases = quick ? (100, 1000) : (100, 300, 1000, 1e4))
+        return
+    end
 
     # First, because everything else depends on it.
     creeping_check(; device = device, domains = quick ? (4.0,) : (3.0, 4.0, 6.0))
@@ -492,6 +596,11 @@ function main(args)
     println("*** about does, and read the low-Reynolds rows — where the reference is exact")
     println("*** and the geometry, not the boundary layer, is the limit — as the honest")
     println("*** measure of how well the surface is resolved.")
+    println()
+
+    channel_check(; device = device, domain = domain, max_settling = ft,
+                  upstream = 3, downstream = quick ? 5 : 8,
+                  cases = quick ? (100, 1000) : (100, 300, 1000, 1e4))
 end
 
 main(ARGS)
