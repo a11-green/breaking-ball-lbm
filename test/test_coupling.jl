@@ -33,6 +33,52 @@
         @test fluid_node_count(wall) < prod(dims)
     end
 
+    @testset "a weighted region measures what the box mean cannot" begin
+        # The box mean is fixed by the mass flux through any plane, so it says
+        # nothing about the profile. A region mean is what reads the profile —
+        # and the two have to agree when the region is the whole fluid.
+        g = uniform(-0.05, 0.012, -0.007, 1.03)
+        fluid = T[wall.kind[i, j, k] == BBL.SOLID_NODE ? 0 : 1
+                  for i in 1:dims[1], j in 1:dims[2], k in 1:dims[3]]
+        ρ̄, ū = mean_fluid_velocity(g, wall)
+        ρ̄r, ūr = region_mean_velocity(g, fluid)
+        @test ρ̄r ≈ ρ̄ rtol = 1e-13
+        @test collect(ūr) ≈ collect(ū) rtol = 1e-12
+
+        # The force enters as Guo's F/2, the same as in the box mean.
+        F = (2e-3, -1e-3, 5e-4)
+        _, ūF = region_mean_velocity(g, fluid, F)
+        @test collect(ūF .- ūr) ≈ collect(F ./ 2 ./ 1.03) rtol = 1e-10
+
+        # A profile the box mean is blind to: one slab slow, one fast, with the
+        # mass flux — and so the box mean — unchanged.
+        slow, fast = -0.03, -0.07
+        s2 = LBMState{T}(dims..., units.τ; lattice = D3Q27())
+        init_equilibrium!(s2, (i, j, k) -> (1.0, i <= dims[1] ÷ 2 ? slow : fast, 0.0, 0.0))
+        g2 = to_cube_order!(similar(s2.f), s2.f)
+        ones3 = ones(T, dims)
+        _, ūall = region_mean_velocity(g2, ones3)
+        @test ūall[1] ≈ (slow + fast) / 2 rtol = 1e-12
+
+        half = zeros(T, dims)
+        half[1:dims[1]÷2, :, :] .= 1
+        _, ūslow = region_mean_velocity(g2, half)
+        @test ūslow[1] ≈ slow rtol = 1e-12
+        @test ūslow[1] / ūall[1] ≈ 0.6 rtol = 1e-12
+
+        # A disc on the axis, which is the shape the sweep actually samples.
+        c = (dims .+ 1) ./ 2
+        disc = T[(i == 7 && (j - c[2])^2 + (k - c[3])^2 <= 16) ? 1 : 0
+                 for i in 1:dims[1], j in 1:dims[2], k in 1:dims[3]]
+        @test sum(disc) > 0
+        _, ūdisc = region_mean_velocity(g2, disc)
+        @test ūdisc[1] ≈ slow rtol = 1e-12
+
+        @test_throws DimensionMismatch region_mean_velocity(g, zeros(T, 3, 3, 3))
+        # An empty region is a zero, not a division by zero.
+        @test region_mean_velocity(g, zeros(T, dims))[1] == 0
+    end
+
     @testset "the mean survives single precision" begin
         # The controller acts on target − mean, which at a production grid is a
         # fraction of a percent of the mean. Accumulating the sum in Float32

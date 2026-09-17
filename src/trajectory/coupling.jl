@@ -92,6 +92,60 @@ function mean_fluid_velocity(g::Array{T,4}, wall::WallField{T},
     return T(ρtot / nfluid), (T(mx / ρtot), T(my / ρtot), T(mz / ρtot))
 end
 
+"""
+    region_mean_velocity(g, weight, force)
+
+Density and velocity averaged over an arbitrary weighted region.
+
+`weight` is one number per node — zero where the node should not count, and it
+is the caller's job to put zeros on the solid nodes, since nothing here knows
+where they are. Otherwise the definition matches [`mean_fluid_velocity`](@ref)
+exactly, `force/2` term and `Float64` accumulation included, and with a weight
+of one on every fluid node the two agree to rounding.
+
+The reason to want this is that **the box mean is not the velocity the body
+sees**. In a periodic box the mean is fixed by the mass flux through any plane,
+so it is the same whatever the wake does; what changes is the profile, and the
+body sits on the axis, in the retarded part of it. A disc of nodes there reads
+the deficit the box mean is blind to.
+
+The two are bounds rather than rivals: the box mean includes the bypass flow the
+body has accelerated, so it is too fast, and the core disc is the deepest part
+of the deficit, so it is too slow. `scripts/validate_sphere_highre.jl` reports a
+drag coefficient against both for exactly that reason.
+"""
+function region_mean_velocity(g::Array{T,4}, weight::Array{T,3},
+                              force::NTuple{3,<:Real} = (0, 0, 0)) where {T}
+    nx, ny, nz = size(g, 1), size(g, 2), size(g, 3)
+    size(weight) == (nx, ny, nz) ||
+        throw(DimensionMismatch("weight is $(size(weight)), the lattice is $((nx, ny, nz))"))
+    Fx, Fy, Fz = Float64(force[1]) / 2, Float64(force[2]) / 2, Float64(force[3]) / 2
+    ρtot = 0.0
+    mx = 0.0; my = 0.0; mz = 0.0
+    wtot = 0.0
+    @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
+        w = Float64(weight[i, j, k])
+        w == 0 && continue
+        ρ = zero(T)
+        px = zero(T); py = zero(T); pz = zero(T)
+        Base.Cartesian.@nexprs 27 s -> begin
+            f_s = g[i, j, k, s]
+            cv_s = cube_velocity(s)
+            ρ += f_s
+            px += T(cv_s[1]) * f_s
+            py += T(cv_s[2]) * f_s
+            pz += T(cv_s[3]) * f_s
+        end
+        ρtot += w * Float64(ρ)
+        mx += w * (Float64(px) + Fx)
+        my += w * (Float64(py) + Fy)
+        mz += w * (Float64(pz) + Fz)
+        wtot += w
+    end
+    (wtot == 0 || ρtot == 0) && return zero(T), (zero(T), zero(T), zero(T))
+    return T(ρtot / wtot), (T(mx / ρtot), T(my / ρtot), T(mz / ρtot))
+end
+
 # --- backend interface -----------------------------------------------------
 #
 # The loop below touches the flow through exactly three operations, so a

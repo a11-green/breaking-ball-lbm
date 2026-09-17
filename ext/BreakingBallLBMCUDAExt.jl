@@ -275,6 +275,41 @@ function BreakingBallLBM.flow_mean_velocity(g::CuArray{T,4}, f::DeviceFlow{T},
 end
 
 """
+    region_mean_velocity(g, weight, force)
+
+Device twin of the host method: one weight per node, zero where it should not
+count, and the same `force/2` and `Float64` accumulation. The reduction is the
+one `flow_mean_velocity` does with the fluid mask — a weighted region is the
+same sum with a different mask, so it is the same 27 passes over the lattice.
+"""
+function BreakingBallLBM.region_mean_velocity(g::CuArray{T,4}, weight::CuArray{T,3},
+                                              force::NTuple{3,<:Real} = (0, 0, 0)) where {T}
+    size(weight) == size(g)[1:3] ||
+        throw(DimensionMismatch("weight is $(size(weight)), the lattice is $(size(g)[1:3])"))
+    n = size(g, 1) * size(g, 2) * size(g, 3)
+    gr = reshape(g, n, 27)
+    w = reshape(weight, n)
+    wtot = mapreduce(Float64, +, w; init = 0.0)
+    wtot == 0 && return zero(T), (zero(T), zero(T), zero(T))
+
+    ρ = 0.0; mx = 0.0; my = 0.0; mz = 0.0
+    for s in 1:27
+        cx, cy, cz = BBL.cube_velocity(s)
+        total = mapreduce((a, b) -> Float64(a) * Float64(b), +,
+                          view(gr, :, s), w; init = 0.0)
+        ρ += total
+        cx != 0 && (mx += cx * total)
+        cy != 0 && (my += cy * total)
+        cz != 0 && (mz += cz * total)
+    end
+    ρ == 0 && return zero(T), (zero(T), zero(T), zero(T))
+    half = 0.5 * wtot
+    return T(ρ / wtot), (T((mx + half * Float64(force[1])) / ρ),
+                         T((my + half * Float64(force[2])) / ρ),
+                         T((mz + half * Float64(force[3])) / ρ))
+end
+
+"""
 Device state for geometry that turns with the ball.
 
 Wraps the static flow handle and adds what a re-cut needs: the permanent shell

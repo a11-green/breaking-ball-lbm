@@ -93,7 +93,7 @@ export LBMState, Lattice, D3Q19, D3Q27,
     CoefficientAero, BallisticAero, no_magnus,
     PLATE_DISTANCE, PFX_SEGMENT, simulate_trajectory, state_at_distance,
     PitchMetrics, pitch_metrics, inches,
-    mean_fluid_velocity, fluid_node_count, to_lattice_force,
+    mean_fluid_velocity, region_mean_velocity, fluid_node_count, to_lattice_force,
     flow_fluid_count, advance_flow!, flow_mean_velocity,
     PitchRun, PitchState, couple_step!, couple_residual, spin_up!, fly!
 

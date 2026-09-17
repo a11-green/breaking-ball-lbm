@@ -30,6 +30,33 @@
 #      Mach number requires either a large tau or a fine grid. The tau sweep at
 #      fixed Re is what says whether that matters here.
 #
+# **And the answer that sweep gave: neither.** Holding Re at 100 and moving tau
+# from 0.505 to 0.6 leaves the ratio at 0.47-0.49, and doubling the resolution
+# leaves it there too. A discretisation error moves when you move the
+# discretisation; this one does not, so it is not one.
+#
+# What is left is the velocity the coefficient is divided by. The box mean is
+# fixed by the mass flux, which is the same through every plane whatever the
+# wake does; what the wake changes is the *profile*, and the sphere sits on the
+# axis, in the retarded part of it. So every row also reports `u_in`, the stream
+# on a frontal disc one and a half diameters upstream, and `ratio_in`, the same
+# measured force normalised by that.
+#
+# **The two are a bracket, not a right answer and a wrong one.** The sphere
+# responds to something between the core it sits in and the mean over the whole
+# plane: the box mean includes the bypass flow the sphere has accelerated, so it
+# is too fast, and the core disc is the deepest part of the deficit, so it is
+# too slow. C_D falls as the reference velocity rises, so the true coefficient
+# lies between `ratio` and `ratio_in`. And in a periodic box there is no plane
+# that escapes this — the upstream face is the downstream one, so the disc reads
+# the wake wrapped round as well as the approach. At three diameters the disc
+# sits exactly at the antipode and the bracket is at its widest.
+#
+# If that bracket is wider than the thing being measured, this configuration
+# cannot validate a drag coefficient at all, whatever the code does. That is a
+# statement about the production setup too: the coupled run uses the same
+# periodic box (§4.4), so the ball is flying in the same wake.
+#
 # The sphere is smooth and not spinning, so there is a reference: the standard
 # drag curve, which is reliable below the drag crisis and which a seamed,
 # spinning ball has no equivalent of. That is the point of validating on it.
@@ -129,6 +156,25 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
     ϕ = sphere_sdf_field(T, dims, R)
     wall = build_wall_field(ϕ; sdf_fn = sphere_sdf_fn(dims, R))
 
+    # The disc that measures what arrives. The stream runs along -x, so upstream
+    # is +x; the plane sits one and a half diameters that way, or at the antipode
+    # if the box is too small for that — in a box of three diameters those are
+    # the same plane, since a periodic box's upstream face is its downstream one.
+    # One and a half diameters is far enough that the sphere's own potential
+    # blockage accounts for only (1/3)^3 = 4% of the deficit read there; the rest
+    # is wake. The disc is the frontal area, so it is the part of the profile the
+    # sphere is actually in — and, being the deepest part of the deficit, a lower
+    # bound on the stream the sphere responds to.
+    centre = (edge + 1) / 2
+    iapp = mod1(round(Int, centre) + min(round(Int, 3N ÷ 2), edge ÷ 2), edge)
+    disc = zeros(T, dims)
+    @inbounds for k in 1:edge, j in 1:edge
+        (T(j) - centre)^2 + (T(k) - centre)^2 <= R^2 || continue
+        wall.kind[iapp, j, k] == BreakingBallLBM.SOLID_NODE && continue
+        disc[iapp, j, k] = one(T)
+    end
+    ndisc = count(!=(0), disc)
+
     s = LBMState{T}(dims..., τ; lattice = D3Q27())
     init_equilibrium!(s, (i, j, k) -> (1.0, -u, 0.0, 0.0))
     g = to_cube_order!(similar(s.f), s.f)
@@ -138,6 +184,7 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
     if device
         g = CuArray(g)
         flow = gpu_flow(wall)
+        disc = CuArray(disc)
     end
 
     # The settling time is advective at high Reynolds number and viscous at low:
@@ -157,7 +204,7 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
     feedforward = (zero(T), zero(T), zero(T))
     prev = T(NaN)
     prev_drift = T(NaN)
-    CD = T(NaN); CL = T(NaN); Ū = u; drift = T(NaN)
+    CD = T(NaN); CL = T(NaN); Ū = u; Ūa = u; drift = T(NaN)
     last_force = (T(NaN), T(NaN), T(NaN))
     done = 0
     windows = 0
@@ -166,11 +213,13 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
     while windows < max_windows
         sumF = (zero(T), zero(T), zero(T))
         sumU = zero(T)
+        sumUa = zero(T)
         n = 0
         local F̄
         while n * chunk < per_window
             ρ̄, ū = device ? flow_mean_velocity(g, flow, control) :
                             mean_fluid_velocity(g, wall, control)
+            _, ūa = region_mean_velocity(g, disc, control)
             # Feed-forward plus PI. At a steady state the body force has to
             # supply exactly the momentum the sphere removes, which is the
             # measured surface force spread over the fluid — so hand the
@@ -192,18 +241,22 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
             all(isfinite, F) || return (CD = T(NaN), CL = T(NaN), τ = τ,
                                         Λ = (τ - T(0.5))^2, Ma = ma, u = u,
                                         Re = T(NaN),
+                                        CD_app = T(NaN), Re_app = T(NaN),
+                                        approach = T(NaN), U_app = T(NaN),
                                         deficit = T(NaN), drift = T(NaN),
                                         flowthroughs = done * u / edge, windows = windows,
                                         steps = done, seconds = time() - t0,
                                         diverged = true)
             sumF = sumF .+ F
             sumU += -ū[1]                 # the stream runs along -x
+            sumUa += -ūa[1]
             feedforward = F ./ nfluid
             n += 1
             done += chunk
         end
 
         Ū = sumU / n
+        Ūa = sumUa / n
         F̄ = sumF ./ n
         q = T(0.5) * Ū^2 * T(π) * R^2     # rho = 1
         CD = -F̄[1] / q
@@ -222,8 +275,14 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
         settled && break
     end
 
+    # The same force, normalised by the stream that arrives instead of by the
+    # box mean. If the gap between the two ratios is the whole discrepancy, the
+    # periodic box is the error and the sphere is fine.
+    qa = T(0.5) * Ūa^2 * T(π) * R^2
+    CDa = ndisc == 0 || Ūa == 0 ? T(NaN) : -last_force[1] / qa
     return (CD = CD, CL = CL, τ = τ, Λ = (τ - T(0.5))^2, Ma = ma, u = u,
             Re = Ū * 2R / ν, deficit = 1 - Ū / u,
+            CD_app = CDa, Re_app = Ūa * 2R / ν, approach = Ūa / Ū, U_app = Ūa,
             drift = drift, force = last_force, U = Ū, ν = ν, R = R, edge = edge,
             flowthroughs = done * u / edge, windows = windows, steps = done,
             seconds = time() - t0, diverged = false)
@@ -231,9 +290,9 @@ end
 
 function sweep(label, cases; kwargs...)
     println(label)
-    @printf("%-9s %-5s %-6s %-9s %-9s %-9s %-8s %-7s %-9s %-6s %-5s\n",
-            "Re asked", "N/D", "C_s", "tau", "Lambda", "Ma", "C_D", "ratio", "drift",
-            "f-thru", "s")
+    @printf("%-9s %-5s %-6s %-8s %-9s %-6s %-8s %-7s %-7s %-8s %-9s %-6s %-5s\n",
+            "Re asked", "N/D", "C_s", "tau", "Lambda", "Ma", "C_D", "ratio",
+            "u_in/U", "ratio_in", "drift", "f-thru", "s")
     for (Re, N, cs) in cases
         try
             r = drag_case(Float32; Re = Re, resolution = N, smagorinsky = cs,
@@ -244,8 +303,10 @@ function sweep(label, cases; kwargs...)
             if r.diverged
                 @printf("%-9.3g %-5d %-6.2f diverged after %d steps\n", Re, N, cs, r.steps)
             else
-                @printf("%-9.3g %-5d %-6.2f %-9.5f %-9.2e %-9.3f %-8.3f %-7.2f %+7.2f%%  %-6.0f %-5.0f\n",
-                        Re, N, cs, r.τ, r.Λ, r.Ma, r.CD, r.CD / ref, 100 * r.drift,
+                ref_in = clift_gauvin(r.Re_app)
+                @printf("%-9.3g %-5d %-6.2f %-8.5f %-9.2e %-6.3f %-8.3f %-7.2f %-7.3f %-8.2f %+8.2f%% %-6.0f %-5.0f\n",
+                        Re, N, cs, r.τ, r.Λ, r.Ma, r.CD, r.CD / ref,
+                        r.approach, r.CD_app / ref_in, 100 * r.drift,
                         r.flowthroughs, r.seconds)
             end
         catch err
@@ -269,8 +330,9 @@ being the wrong one for the reference above.
 """
 function creeping_check(; device = HAS_CUDA, domains = (3.0, 4.0, 6.0))
     println("Creeping flow against Hasimoto — the reference a periodic box does have")
-    @printf("%-9s %-5s %-7s %-9s %-11s %-11s %-8s %-7s\n",
-            "domain/D", "N/D", "tau", "Ma", "F measured", "F Hasimoto", "ratio", "drift")
+    @printf("%-9s %-5s %-7s %-9s %-11s %-11s %-8s %-7s %-7s\n",
+            "domain/D", "N/D", "tau", "Ma", "F measured", "F Hasimoto", "ratio",
+            "u_in/U", "drift")
     for L in domains
         try
             # tau = 0.8, so the wall sits where bounce-back nominally puts it.
@@ -281,8 +343,9 @@ function creeping_check(; device = HAS_CUDA, domains = (3.0, 4.0, 6.0))
                           max_settling = 40.0, tolerance = 0.005, device = device)
             μ = r.ν                                   # rho = 1
             F = hasimoto_factor(r.R, r.edge) * 6π * μ * r.R * r.U
-            @printf("%-9.1f %-5d %-7.3f %-9.2e %-11.4g %-11.4g %-8.3f %+.2f%%\n",
-                    L, 16, r.τ, r.Ma, -r.force[1], F, -r.force[1] / F, 100 * r.drift)
+            @printf("%-9.1f %-5d %-7.3f %-9.2e %-11.4g %-11.4g %-8.3f %-7.3f %+.2f%%\n",
+                    L, 16, r.τ, r.Ma, -r.force[1], F, -r.force[1] / F,
+                    r.approach, 100 * r.drift)
         catch err
             @printf("%-9.1f skipped (%s)\n", L, first(split(sprint(showerror, err), '\n')))
         end
@@ -309,16 +372,18 @@ condition, not the physics.
 """
 function tau_sweep(; device = HAS_CUDA, Re = 100, domain = 4.0, max_settling = 60.0)
     println("One Reynolds number, several relaxation times — the boundary condition alone")
-    @printf("%-5s %-7s %-9s %-9s %-9s %-9s %-7s %-8s\n",
-            "N/D", "tau", "Lambda", "Ma", "C_D", "reference", "ratio", "drift")
+    @printf("%-5s %-7s %-9s %-7s %-8s %-9s %-7s %-7s %-8s %-8s\n",
+            "N/D", "tau", "Lambda", "Ma", "C_D", "reference", "ratio",
+            "u_in/U", "ratio_in", "drift")
     for (N, τ) in ((20, 0.505), (20, 0.51), (20, 0.52),
                    (40, 0.52), (40, 0.56), (40, 0.6))
         try
             r = drag_case(Float32; Re = Re, resolution = N, domain = domain, tau = τ,
                           max_settling = max_settling, device = device)
             ref = clift_gauvin(r.Re)
-            @printf("%-5d %-7.3f %-9.2e %-9.3f %-9.3f %-9.3f %-7.2f %+.2f%%\n",
-                    N, r.τ, r.Λ, r.Ma, r.CD, ref, r.CD / ref, 100 * r.drift)
+            @printf("%-5d %-7.3f %-9.2e %-7.3f %-8.3f %-9.3f %-7.2f %-7.3f %-8.2f %+.2f%%\n",
+                    N, r.τ, r.Λ, r.Ma, r.CD, ref, r.CD / ref,
+                    r.approach, r.CD_app / clift_gauvin(r.Re_app), 100 * r.drift)
         catch err
             @printf("%-5d %-7.3f skipped (%s)\n", N, τ,
                     first(split(sprint(showerror, err), '\n')))
@@ -371,15 +436,17 @@ function main(args)
     # images pull the drag up, and the wake deficit pulls the box mean down; both
     # shrink as the domain grows, and neither is a property of the sphere.
     println("Blockage — the same sphere in boxes of different size (Re = 1000, N/D = 20)")
-    @printf("%-9s %-10s %-9s %-9s %-9s %-8s %-7s\n",
-            "domain/D", "radius/L", "Re got", "C_D", "reference", "ratio", "drift")
+    @printf("%-9s %-10s %-9s %-8s %-9s %-7s %-7s %-8s %-7s\n",
+            "domain/D", "radius/L", "Re got", "C_D", "reference", "ratio",
+            "u_in/U", "ratio_in", "drift")
     for L in (3.0, 4.0, 6.0, 8.0)
         try
             r = drag_case(Float32; Re = 1000, resolution = 20, domain = L,
                           lattice_speed = 0.05, max_settling = ft, device = device)
             ref = clift_gauvin(r.Re)
-            @printf("%-9.1f %-10.3f %-9.4g %-9.3f %-9.3f %-8.2f %+.2f%%\n",
-                    L, 0.5 / L, r.Re, r.CD, ref, r.CD / ref, 100 * r.drift)
+            @printf("%-9.1f %-10.3f %-9.4g %-8.3f %-9.3f %-7.2f %-7.3f %-8.2f %+.2f%%\n",
+                    L, 0.5 / L, r.Re, r.CD, ref, r.CD / ref,
+                    r.approach, r.CD_app / clift_gauvin(r.Re_app), 100 * r.drift)
         catch err
             @printf("%-9.1f skipped (%s)\n", L, first(split(sprint(showerror, err), '\n')))
         end
@@ -395,6 +462,20 @@ function main(args)
     println("Read the drift column first: a case that gave up at the cap without settling")
     println("shows it there, and its other columns mean nothing. The drag settles slowly")
     println("because the sphere sits in its own wake.")
+    println()
+    println("Then the two ratio columns, which bracket rather than compete. `ratio` divides")
+    println("by the box mean, which includes the bypass flow the sphere has accelerated and")
+    println("is therefore too fast; `ratio_in` divides by the core disc upstream, which is")
+    println("the deepest part of the wake deficit and is therefore too slow. C_D falls as")
+    println("the reference velocity rises, so the true coefficient is between them.")
+    println()
+    println("A bracket that straddles one says the sphere is fine and the box is the error.")
+    println("A bracket that is wide says this configuration cannot measure a drag")
+    println("coefficient at all — and `u_in/U` says why, being the fraction of the stream")
+    println("that survives the wrap-around to arrive at the sphere. Both are statements")
+    println("about the production setup as much as about this sweep: the coupled run uses")
+    println("the same periodic box (§4.4), so the pitch flies in the same wake. The way out")
+    println("is an inflow and an outflow face, which is the one piece of §4.4 still missing.")
     println()
     println("Then: the resolution at which the ratio column settles near one,")
     println("and whether the Smagorinsky rows differ from their C_s = 0 neighbours. If they")

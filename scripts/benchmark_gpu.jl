@@ -172,10 +172,26 @@ function check_coupling(::Type{T}; n = 20, radius = 3.5, cycles = 6,
     vel_err = rel(st_gpu.ball.v, st_cpu.ball.v, 39.0)
     ctl_err = rel(st_gpu.control, st_cpu.control, maximum(abs.(collect(st_cpu.control))))
 
+    # The weighted region mean, on the developed field rather than the uniform
+    # one it started from — a uniform field would agree whatever the reduction
+    # did. Both sides read the *same* host data, so this is the kernel on its
+    # own and not the two runs having drifted apart. The drag sweep divides a
+    # coefficient by what this returns, so it answers to the same bar.
+    disc = zeros(T, dims)
+    c = T(n + 1) / 2
+    plane = n - 1
+    @inbounds for k in 1:n, j in 1:n
+        (T(j) - c)^2 + (T(k) - c)^2 <= T(radius)^2 && (disc[plane, j, k] = one(T))
+    end
+    _, ur_c = region_mean_velocity(g_cpu, disc, st_cpu.control)
+    _, ur_d = region_mean_velocity(CuArray(g_cpu), CuArray(disc), st_cpu.control)
+    region_err = rel(ur_d, ur_c, 0.05)
+
     tol = T === Float32 ? 1e-2 : 1e-9
-    ok = mean_err < tol && force_err < tol && vel_err < tol && ctl_err < tol
-    @printf("  %-8s coupled loop: mean %.2e, force %.2e, control %.2e, velocity %.2e  %s\n",
-            T, mean_err, force_err, ctl_err, vel_err, ok ? "OK" : "FAILED")
+    ok = mean_err < tol && force_err < tol && vel_err < tol && ctl_err < tol &&
+         region_err < tol
+    @printf("  %-8s coupled loop: mean %.2e, region %.2e, force %.2e, control %.2e, velocity %.2e  %s\n",
+            T, mean_err, region_err, force_err, ctl_err, vel_err, ok ? "OK" : "FAILED")
     return ok
 end
 
