@@ -36,6 +36,7 @@ include("trajectory/trajectory.jl")
 include("trajectory/coupling.jl")
 include("refine/two_grid.jl")
 include("postprocess/fields.jl")
+include("postprocess/pitch_view.jl")
 include("refine/refined_flow.jl")
 include("validation/sphere_array.jl")
 
@@ -68,6 +69,8 @@ export LBMState, Lattice, D3Q19, D3Q27,
     TwoGrid, fine_tau, neq_rescale, fine_force, grid_sizes,
     interface_fill!, restrict!, save_coarse!, refine_cycle!,
     init_refined!, level_macroscopic, node_macroscopic,
+    TrajectorySamples, samples, break_references, seam_world, spin_axis_world,
+    PITCH_TYPES, pitch_family, at_time, plate_box, coefficient_series,
     velocity_field, density_field, magnitude, velocity_gradient,
     vorticity, q_criterion, field_limits, slice_field,
     interface_nodes, fill_interface_node!, restrict_node!, coarse_span,
