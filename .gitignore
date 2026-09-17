@@ -5,7 +5,10 @@ Manifest.toml
 *.jl.mem
 /docs/build/
 
-# Simulation output
+# Simulation output. Trajectories land at the repository root by default, so
+# they have to be named here or a run leaves the tree dirty — and worse, a
+# committed one blocks everyone else's pull the next time they run the script.
+/pitch*.csv
 *.vtk
 *.vti
 *.vtr
