@@ -34,6 +34,7 @@ include("trajectory/frame.jl")
 include("trajectory/aero_model.jl")
 include("trajectory/trajectory.jl")
 include("trajectory/coupling.jl")
+include("refine/two_grid.jl")
 include("validation/sphere_array.jl")
 
 export LBMState, Lattice, D3Q19, D3Q27,
@@ -61,6 +62,9 @@ export LBMState, Lattice, D3Q19, D3Q27,
     TaylorGreen, PoiseuilleChannel, poiseuille_velocity, poiseuille_peak, channel_sdf,
     sphere_sdf_field, sphere_sdf_fn, exact_sphere_delta,
     hasimoto_factor, stokes_drag, superficial_velocity,
+    TwoGrid, fine_tau, neq_rescale, fine_force, grid_sizes,
+    interface_fill!, restrict!, save_coarse!, refine_cycle!,
+    init_refined!, level_macroscopic, node_macroscopic,
     Quat, quat_from_axis_angle, rotate, unrotate, quat_rate, rotation_matrix,
     LatticeUnits, mach_number, lattice_reynolds, resolution_report,
     boundary_layer_thickness, grid_budget,
