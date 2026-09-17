@@ -195,7 +195,7 @@ are the *same number*. Using the freshly measured force for the trajectory and
 last cycle's for the fluid would put the free stream and the inflow condition a
 sub-cycle out of step, which is the drift the whole scheme is built to avoid.
 """
-function couple_step!(g::AbstractArray{T,4}, run::PitchRun{T}, st::PitchState{T},
+function couple_step!(g, run::PitchRun{T}, st::PitchState{T},
                       flow; frozen::Bool = false) where {T}
     u = run.units
     target = lattice_freestream(u, st.ball)
@@ -278,7 +278,7 @@ Develop the boundary layer with the trajectory frozen (§5). Returns the
 residual after the last cycle, which is the honest measure of whether the flow
 has settled enough to start integrating the trajectory.
 """
-function spin_up!(g::AbstractArray{T,4}, run::PitchRun{T}, st::PitchState{T},
+function spin_up!(g, run::PitchRun{T}, st::PitchState{T},
                   flow; cycles::Integer = 10) where {T}
     local res = T(Inf)
     for _ in 1:cycles
@@ -296,7 +296,7 @@ each sub-cycle and may return `false` to stop — which is how the caller ends t
 run at the plate, or rebuilds the wall geometry once
 [`orientation_drift`](@ref) says the seam has turned far enough to matter.
 """
-function fly!(g::AbstractArray{T,4}, run::PitchRun{T}, st::PitchState{T}, flow;
+function fly!(g, run::PitchRun{T}, st::PitchState{T}, flow;
               cycles::Integer = 100, callback = nothing) where {T}
     for _ in 1:cycles
         couple_step!(g, run, st, flow)

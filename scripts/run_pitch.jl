@@ -54,6 +54,7 @@ Base.@kwdef mutable struct PitchConfig
     max_cycles::Int = 2_000_000
     out::String = "pitch.csv"
     smoke::Bool = false
+    refine::Float64 = 0.0         # fine-patch edge in diameters; 0 = uniform grid
     device::Bool = HAS_CUDA
 end
 
@@ -76,6 +77,9 @@ function parse_args(args)
               --distance D         release to plate, m (default $(round(c.distance, digits=3)))
               --spinup N           sub-cycles before the trajectory is released
               --spinup-flowthroughs F  instead, in box flow-through times (default $(c.spinup_flowthroughs))
+              --refine F           refine a box of F diameters around the ball to 2x
+                                   (§6.5.1 — the only way to get a seam worth the
+                                   name in an eight-diameter domain; host only)
               --cpu                force the host path even if a GPU is present
               --out FILE           trajectory CSV (default $(c.out))
             Coordinates: x toward the plate, z up, y to the pitcher's left.""")
@@ -95,6 +99,7 @@ function parse_args(args)
         elseif a == "--distance";   c.distance = parse(Float64, take())
         elseif a == "--spinup";     c.spinup = parse(Int, take())
         elseif a == "--spinup-flowthroughs"; c.spinup_flowthroughs = parse(Float64, take())
+        elseif a == "--refine";     c.refine = parse(Float64, take())
         elseif a == "--cpu";        c.device = false
         elseif a == "--out";        c.out = take()
         else
@@ -105,6 +110,10 @@ function parse_args(args)
     return c
 end
 
+"""How many times the seam has been re-cut, whichever backend is carrying it."""
+recut_count(flow) = flow.recuts
+recut_count(flow::RefinedFlow) = flow.wall.recuts
+
 """Refuse a run that cannot fit, before it spends an hour finding out."""
 function plan(c::PitchConfig)
     T = c.precision === :f32 ? Float32 : Float64
@@ -114,13 +123,23 @@ function plan(c::PitchConfig)
     gib = nodes * (27 * sizeof(T) + 8) / 2^30      # populations, kind, mask
     budget = grid_budget(; nodes_per_diameter = c.resolution, domain_diameters = c.domain)
 
-    @printf("Grid        %d³ = %.1f M nodes, %.2f GiB (%s)\n",
-            edge, nodes / 1e6, gib, T)
+    @printf("Grid        %d³ = %.1f M nodes, %.2f GiB (%s)%s\n",
+            edge, nodes / 1e6, gib, T, c.refine > 0 ? ", coarse level" : "")
     @printf("Spacing     %.3f mm — seam ridge %.2f cells, boundary layer %.2f cells\n",
             budget.dx_mm, budget.seam_cells, budget.boundary_layer_cells)
     @printf("Lattice     tau - 1/2 = %.2e, Ma = %.3f, Re = %.3e\n",
             units.τ - 0.5, mach_number(units), lattice_reynolds(units))
     @printf("Blockage    sphere radius is %.3f of the box edge\n", budget.blockage)
+    if c.refine > 0
+        fine_budget = grid_budget(; nodes_per_diameter = 2 * c.resolution,
+                                  domain_diameters = c.refine)
+        @printf("Refined     %.1f D patch at %d/D: %d³ fine nodes, %.3f mm, seam %.2f cells\n",
+                c.refine, 2 * c.resolution, fine_budget.edge,
+                fine_budget.dx_mm, fine_budget.seam_cells)
+        @printf("            %.2f GiB for the patch on top of the coarse level\n",
+                fine_budget.gib)
+        budget = fine_budget      # the warning below should judge what resolves the ball
+    end
     if budget.seam_cells < 0.2 || budget.boundary_layer_cells < 0.2
         println("\n*** The seam and the boundary layer are far below one cell here, so the")
         println("*** coefficients this produces are a test of the plumbing, not of the")
@@ -149,12 +168,28 @@ function main(args)
     geom = BaseballGeometry(; diameter = T(0.0748), seam_height = T(0.00079),
                             seam_amplitude = T(0.7))
     props = BaseballProperties(T; diameter = 0.0748)
-    wall = RotatingWall(geom, dims, units.dx)
 
     ball = BallState(T; position = c.release, velocity = (c.speed, 0.0, 0.0),
                      spin = spin_from_rpm(c.axis, c.rpm))
     spin_lat = lattice_spin(units, ball)
-    nsub = min(max_substeps(wall, spin_lat, c.recut_drift), 100)
+
+    local wall, flow, state_arg
+    if c.refine > 0
+        c.device && error("the refined path is host-only for now — add --cpu")
+        half = round(Int, c.refine * c.resolution / 2)
+        mid = (edge + 1) ÷ 2
+        clo = ntuple(_ -> mid - half, 3)
+        chi = ntuple(_ -> mid + half, 3)
+        grid = TwoGrid(T, dims, clo, chi, units.τ)
+        wall = RotatingWall(geom, size(grid.fine)[1:3], units.dx / 2)
+        flow = RefinedFlow(grid, wall)
+        state_arg = grid
+    else
+        wall = RotatingWall(geom, dims, units.dx)
+        flow = wall
+        state_arg = nothing
+    end
+    nsub = min(max_substeps(flow, spin_lat, c.recut_drift), 100)
     run = PitchRun(units, props; substeps = nsub, control_time = 40 * nsub,
                    recut_drift = c.recut_drift, operator = c.operator, rule = c.rule)
 
@@ -170,18 +205,22 @@ function main(args)
 
     # The free stream in the frame is -V, uniform, at rest density.
     u0 = lattice_freestream(units, ball)
-    state = LBMState{T}(dims..., units.τ; lattice = D3Q27())
-    init_equilibrium!(state, (i, j, k) -> (1.0, u0[1], u0[2], u0[3]))
-    g = to_cube_order!(similar(state.f), state.f)
-    state = nothing
-
-    flow = wall
-    if c.device
-        g = CuArray(g)
-        flow = gpu_rotating_flow(wall)
-        println("Backend     CUDA, ", CUDA.name(CUDA.device()))
+    local g
+    if c.refine > 0
+        init_refined_flow!(flow, (x, y, z) -> (1.0, u0[1], u0[2], u0[3]))
+        g = state_arg
+        println("Backend     host, two-level refinement")
     else
-        println("Backend     host")
+        lbm = LBMState{T}(dims..., units.τ; lattice = D3Q27())
+        init_equilibrium!(lbm, (i, j, k) -> (1.0, u0[1], u0[2], u0[3]))
+        g = to_cube_order!(similar(lbm.f), lbm.f)
+        if c.device
+            g = CuArray(g)
+            flow = gpu_rotating_flow(wall)
+            println("Backend     CUDA, ", CUDA.name(CUDA.device()))
+        else
+            println("Backend     host")
+        end
     end
     println()
 
@@ -213,7 +252,7 @@ function main(args)
         if cycles % c.report_every == 0 || s.ball.x[1] >= c.distance
             @printf("%-9.4f %-8.3f %-8.4f %-8.4f %-8.2f %-7.3f %-7.3f %-7.3f %-6d %-8.3f\n",
                     s.ball.t, s.ball.x[1], s.ball.x[2], s.ball.x[3], speed(s.ball),
-                    CD, CL, Cs, flow.recuts, couple_residual(run, s, flow))
+                    CD, CL, Cs, recut_count(flow), couple_residual(run, s, flow))
             flush(stdout)
         end
 
