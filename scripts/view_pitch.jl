@@ -16,15 +16,20 @@
 # what the conventions mean.
 #
 # Makie is not a dependency of this package. Install it into the default
-# environment, the way CUDA is installed for the benchmark:
+# environment, the way CUDA is installed for the benchmark. The surest way, with
+# no quoting for a shell to disagree about, is Julia's own package mode: start
+# `julia`, press `]`, and type `add GLMakie` (a window), `add WGLMakie` (a
+# browser, no OpenGL) or `add CairoMakie` (a file, no display at all).
 #
-#   julia -e 'using Pkg; Pkg.add("GLMakie")'          # a window
-#   julia -e 'using Pkg; Pkg.add("WGLMakie")'         # a browser, no OpenGL
+# From a shell instead — note that cmd.exe does not take single quotes as
+# quotes, and does not treat `#` as starting a comment:
 #
-#   julia -e 'using Pkg; Pkg.add("CairoMakie")'        # a file, no display
+#   julia -e 'using Pkg; Pkg.add("GLMakie")'        # POSIX shells
+#   julia -e "import Pkg; Pkg.add(\"GLMakie\")"     # cmd.exe / PowerShell
 #
 #   julia --project=. scripts/view_pitch.jl
-#   julia --project=. scripts/view_pitch.jl --web           # WGLMakie
+#   julia --project=. scripts/view_pitch.jl --family
+#   julia --project=. scripts/view_pitch.jl --web
 #   julia --project=. scripts/view_pitch.jl --record out.mp4
 #   julia --project=. scripts/view_pitch.jl --backend cairomakie --record out.png
 #   julia --project=. scripts/view_pitch.jl --help
