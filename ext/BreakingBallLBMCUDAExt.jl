@@ -418,4 +418,234 @@ function BreakingBallLBM.maybe_recut!(g::CuArray{T,4}, drw::DeviceRotatingFlow{T
     return BreakingBallLBM.recut!(drw, q, g, spin)
 end
 
+# --- two-level refinement --------------------------------------------------
+#
+# The transfers are written against a (parent, child) pair, so the same kernels
+# serve a deeper hierarchy if one is ever nested — only the host-side recursion
+# would change.
+
+"""Device copy of a [`TwoGrid`](@ref), with the interface node list precomputed."""
+mutable struct DeviceTwoGrid{T<:AbstractFloat,A,P,V}
+    coarse::A
+    fine::A
+    prev::P
+    τc::T
+    τf::T
+    lo::NTuple{3,Int}
+    hi::NTuple{3,Int}
+    ratio::Int
+    α::T
+    edge::V
+    layers::Int
+end
+
+"""
+    gpu_two_grid(rg; layers = 3)
+
+Move a [`TwoGrid`](@ref) to the device. The interface node list is built once on
+the host: the patch never moves, and launching a thread per fine node would have
+fifteen sixteenths of them exit immediately at production size.
+"""
+function BreakingBallLBM.gpu_two_grid(rg::BBL.TwoGrid{T}; layers::Integer = 3) where {T}
+    edge = CuArray(BBL.interface_nodes(size(rg.fine)[1:3], layers))
+    return DeviceTwoGrid{T,typeof(CuArray(rg.coarse)),typeof(CuArray(rg.prev)),typeof(edge)}(
+        CuArray(rg.coarse), CuArray(rg.fine), CuArray(rg.prev),
+        rg.τc, rg.τf, rg.lo, rg.hi, rg.ratio, rg.α, edge, Int(layers))
+end
+
+function interface_kernel!(fine, coarse, prev, lo::NTuple{3,Int}, α::T, θ::T, edge) where {T}
+    n = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
+    if n <= length(edge)
+        @inbounds abc = edge[n]
+        neq_a = MVector{27,T}(undef)
+        neq_b = MVector{27,T}(undef)
+        acc = MVector{27,T}(undef)
+        BBL.fill_interface_node!(fine, coarse, prev, lo, α, θ,
+                                 Int(abc[1]), Int(abc[2]), Int(abc[3]),
+                                 neq_a, neq_b, acc)
+    end
+    return nothing
+end
+
+function restrict_kernel!(coarse, fine, lo::NTuple{3,Int}, ext::NTuple{3,Int},
+                          ratio::Int, invα::T) where {T}
+    n = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
+    if n <= ext[1] * ext[2] * ext[3]
+        t = Int(n) - 1
+        i = lo[1] + 1 + t % ext[1]
+        j = lo[2] + 1 + (t ÷ ext[1]) % ext[2]
+        k = lo[3] + 1 + t ÷ (ext[1] * ext[2])
+        a = ratio * (i - lo[1]) + 1
+        b = ratio * (j - lo[2]) + 1
+        c = ratio * (k - lo[3]) + 1
+        acc = MVector{27,T}(undef)
+        BBL.restrict_node!(coarse, fine, i, j, k, a, b, c, invα, acc)
+    end
+    return nothing
+end
+
+"""Snapshot the covered coarse box; a strided copy, so no kernel of its own."""
+function BreakingBallLBM.save_coarse!(dg::DeviceTwoGrid)
+    dg.prev .= view(dg.coarse, dg.lo[1]:dg.hi[1], dg.lo[2]:dg.hi[2], dg.lo[3]:dg.hi[3], :)
+    return dg
+end
+
+function BreakingBallLBM.interface_fill!(dg::DeviceTwoGrid{T}, frac::Real;
+                                         layers::Integer = dg.layers,
+                                         threads::Int = 128, scratch = nothing) where {T}
+    layers == dg.layers ||
+        throw(ArgumentError("the device node list was built for $(dg.layers) layers, not $layers"))
+    n = length(dg.edge)
+    n == 0 && return dg
+    @cuda threads = threads blocks = cld(n, threads) interface_kernel!(
+        dg.fine, dg.coarse, dg.prev, dg.lo, dg.α, T(frac), dg.edge)
+    return dg
+end
+
+function BreakingBallLBM.restrict!(dg::DeviceTwoGrid{T}; filtered::Bool = false,
+                                   threads::Int = 128, scratch = nothing) where {T}
+    filtered && throw(ArgumentError("the filtered restriction is host-only; it is off by " *
+                                    "default because it measured worse (see restrict!)"))
+    ext = ntuple(d -> dg.hi[d] - dg.lo[d] - 1, 3)
+    n = prod(ext)
+    n <= 0 && return dg
+    @cuda threads = threads blocks = cld(n, threads) restrict_kernel!(
+        dg.coarse, dg.fine, dg.lo, ext, dg.ratio, one(T) / dg.α)
+    return dg
+end
+
+"""
+Device state for a ball inside the refined patch.
+
+`coarse_mask` is the coarse level's fluid mask — one where the box-mean should
+count a node, zero inside the ball — and it has to be rebuilt whenever a re-cut
+flips a node, or the controller spreads its momentum over the wrong volume.
+"""
+mutable struct DeviceRefinedFlow{T<:AbstractFloat,G,W,M}
+    grid::G
+    wall::W
+    coarse_mask::M
+    nfluid::Int
+    cycles::Int
+end
+
+function BreakingBallLBM.gpu_refined_flow(rf::BBL.RefinedFlow{T}; layers::Integer = 3) where {T}
+    dg = BreakingBallLBM.gpu_two_grid(rf.grid; layers = layers)
+    dw = BreakingBallLBM.gpu_rotating_flow(rf.wall)
+    mask = CuArray(T.(.!rf.coarse_solid))
+    return DeviceRefinedFlow{T,typeof(dg),typeof(dw),typeof(mask)}(
+        dg, dw, mask, rf.nfluid, rf.cycles)
+end
+
+function coarse_mask_kernel!(mask, kind, lo::NTuple{3,Int}, ext::NTuple{3,Int},
+                             ratio::Int, ::Type{T}) where {T}
+    n = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
+    if n <= ext[1] * ext[2] * ext[3]
+        t = Int(n) - 1
+        i = lo[1] + t % ext[1]
+        j = lo[2] + (t ÷ ext[1]) % ext[2]
+        k = lo[3] + t ÷ (ext[1] * ext[2])
+        a = ratio * (i - lo[1]) + 1
+        b = ratio * (j - lo[2]) + 1
+        c = ratio * (k - lo[3]) + 1
+        @inbounds mask[i, j, k] = kind[a, b, c] == BBL.SOLID_NODE ? zero(T) : one(T)
+    end
+    return nothing
+end
+
+function BreakingBallLBM.refresh_coarse_solid!(drf::DeviceRefinedFlow{T};
+                                               threads::Int = 128) where {T}
+    dg = drf.grid
+    ext = ntuple(d -> dg.hi[d] - dg.lo[d] + 1, 3)
+    n = prod(ext)
+    @cuda threads = threads blocks = cld(n, threads) coarse_mask_kernel!(
+        drf.coarse_mask, drf.wall.flow.wall.kind, dg.lo, ext, dg.ratio, T)
+    drf.nfluid = Int(sum(drf.coarse_mask))
+    return drf
+end
+
+BreakingBallLBM.flow_fluid_count(drf::DeviceRefinedFlow) = drf.nfluid
+
+"""Mass-averaged density and velocity over the coarse level, skipping the ball."""
+function BreakingBallLBM.flow_mean_velocity(dg::DeviceTwoGrid{T},
+                                            drf::DeviceRefinedFlow{T},
+                                            force::NTuple{3,<:Real}) where {T}
+    n = size(dg.coarse, 1) * size(dg.coarse, 2) * size(dg.coarse, 3)
+    gr = reshape(dg.coarse, n, 27)
+    mask = reshape(drf.coarse_mask, n)
+
+    ρ = 0.0; mx = 0.0; my = 0.0; mz = 0.0
+    for s in 1:27
+        cx, cy, cz = BBL.cube_velocity(s)
+        total = mapreduce((a, b) -> Float64(a) * Float64(b), +,
+                          view(gr, :, s), mask; init = 0.0)
+        ρ += total
+        cx != 0 && (mx += cx * total)
+        cy != 0 && (my += cy * total)
+        cz != 0 && (mz += cz * total)
+    end
+    ρ == 0 && return zero(T), (zero(T), zero(T), zero(T))
+    half = 0.5 * drf.nfluid
+    return T(ρ / drf.nfluid), (T((mx + half * Float64(force[1])) / ρ),
+                               T((my + half * Float64(force[2])) / ρ),
+                               T((mz + half * Float64(force[3])) / ρ))
+end
+
+function BreakingBallLBM.advance_flow!(dg::DeviceTwoGrid{T}, drf::DeviceRefinedFlow{T},
+                                       nsteps::Integer, τ::Real;
+                                       force::NTuple{3,<:Real} = (0, 0, 0),
+                                       spin::NTuple{3,<:Real} = (0, 0, 0),
+                                       operator::Symbol = :central_moment,
+                                       rule::Symbol = :interpolated_local,
+                                       omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
+                                       threads::Int = 128) where {T}
+    iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
+    m = dg.ratio
+    Fc = T.(force)
+    Ff = BBL.fine_force(Fc, m)
+    ωf = T.(spin) ./ m
+    dwall = drf.wall
+
+    sF = (zero(T), zero(T), zero(T))
+    sM = (zero(T), zero(T), zero(T))
+    cycles = nsteps ÷ 2
+    for _ in 1:cycles
+        BreakingBallLBM.save_coarse!(dg)
+        BreakingBallLBM.gpu_run!(dg.coarse, 2, dg.τc; force = Fc, operator = operator,
+                                 omega_bulk = omega_bulk, omega_higher = omega_higher,
+                                 threads = threads)
+        for half in 1:2
+            F, M = BreakingBallLBM.gpu_run_walls!(dg.fine, dwall.flow.wall,
+                                                  dwall.flow.contrib, 2, dg.τf;
+                                                  force = Ff, spin = ωf,
+                                                  operator = operator, rule = rule,
+                                                  reduction = :mean,
+                                                  omega_bulk = omega_bulk,
+                                                  omega_higher = omega_higher,
+                                                  threads = threads)
+            sF = sF .+ F
+            sM = sM .+ M
+            BreakingBallLBM.interface_fill!(dg, half / 2; threads = threads)
+        end
+        BreakingBallLBM.restrict!(dg; threads = threads)
+        drf.cycles += 1
+    end
+    w = one(T) / (2 * cycles)
+    return BBL.coarse_force(sF .* w, m), BBL.coarse_torque(sM .* w, m)
+end
+
+function BreakingBallLBM.maybe_recut!(dg::DeviceTwoGrid{T}, drf::DeviceRefinedFlow{T},
+                                      q::BBL.Quat{T}, spin::NTuple{3,<:Real},
+                                      drift::Real) where {T}
+    ωf = T.(spin) ./ dg.ratio
+    fresh = BreakingBallLBM.maybe_recut!(dg.fine, drf.wall, q, ωf, drift)
+    fresh == 0 && return 0
+    BreakingBallLBM.refresh_coarse_solid!(drf)
+    return fresh
+end
+
+BreakingBallLBM.max_substeps(drf::DeviceRefinedFlow, spin::NTuple{3,<:Real}, drift::Real) =
+    max(2, 2 * floor(Int, drift /
+        (BBL.surface_drift_per_step(drf.wall, spin ./ drf.grid.ratio) * drf.grid.ratio) / 2))
+
 end # module

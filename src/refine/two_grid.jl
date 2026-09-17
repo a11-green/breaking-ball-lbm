@@ -166,6 +166,83 @@ end
 covered_offset(rg::TwoGrid, i::Int, j::Int, k::Int) =
     (i - rg.lo[1] + 1, j - rg.lo[2] + 1, k - rg.lo[3] + 1)
 
+"""
+    interface_nodes(dims, layers)
+
+The fine nodes the coarse level imposes, as a list.
+
+The patch never moves, so this is computed once. A kernel could instead launch a
+thread per fine node and have the interior exit immediately, but at production
+the interior is fifteen sixteenths of eighteen million threads, and the list
+costs a few megabytes.
+"""
+function interface_nodes(dims::NTuple{3,<:Integer}, layers::Integer)
+    nx, ny, nz = dims
+    L = Int(layers)
+    out = NTuple{3,Int32}[]
+    for c in 1:nz, b in 1:ny, a in 1:nx
+        (a <= L || a > nx - L || b <= L || b > ny - L || c <= L || c > nz - L) || continue
+        push!(out, (Int32(a), Int32(b), Int32(c)))
+    end
+    return out
+end
+
+"""
+    fill_interface_node!(fine, coarse, prev, lo, α, θ, a, b, c, neq_a, neq_b, acc)
+
+One fine boundary node, imposed from the coarse level at time fraction `θ`.
+
+Shared with the CUDA kernel, which is why the three scratch vectors are
+arguments rather than allocations: on the device they are thread-local
+`MVector`s.
+"""
+@inline function fill_interface_node!(fine, coarse, prev, lo::NTuple{3,Int},
+                                      α::T, θ::T, a::Int, b::Int, c::Int,
+                                      neq_a, neq_b, acc) where {T}
+    i0, i1 = coarse_span(lo[1], a)
+    j0, j1 = coarse_span(lo[2], b)
+    k0, k1 = coarse_span(lo[3], c)
+
+    ρ = zero(T); ux = zero(T); uy = zero(T); uz = zero(T)
+    for s in 1:27
+        @inbounds acc[s] = zero(T)
+    end
+    n = 0
+    for kk in k0:k1, jj in j0:j1, ii in i0:i1
+        oi = ii - lo[1] + 1; oj = jj - lo[2] + 1; ok = kk - lo[3] + 1
+        ρa, xa, ya, za = node_nonequilibrium!(neq_a, prev, oi, oj, ok, T)
+        ρb, xb, yb, zb = node_nonequilibrium!(neq_b, coarse, ii, jj, kk, T)
+        ρ += ρa + θ * (ρb - ρa)
+        ux += xa + θ * (xb - xa)
+        uy += ya + θ * (yb - ya)
+        uz += za + θ * (zb - za)
+        for s in 1:27
+            @inbounds acc[s] += neq_a[s] + θ * (neq_b[s] - neq_a[s])
+        end
+        n += 1
+    end
+    w = one(T) / n
+    ρ *= w; ux *= w; uy *= w; uz *= w
+    for s in 1:27
+        @inbounds fine[a, b, c, s] = cube_equilibrium(s, ρ, ux, uy, uz) + α * acc[s] * w
+    end
+    return nothing
+end
+
+"""
+    restrict_node!(coarse, fine, i, j, k, a, b, c, invα, acc)
+
+One coarse node, taken from the coincident fine node. Shared with the kernel.
+"""
+@inline function restrict_node!(coarse, fine, i::Int, j::Int, k::Int,
+                                a::Int, b::Int, c::Int, invα::T, acc) where {T}
+    ρ, ux, uy, uz = node_nonequilibrium!(acc, fine, a, b, c, T)
+    for s in 1:27
+        @inbounds coarse[i, j, k, s] = cube_equilibrium(s, ρ, ux, uy, uz) + invα * acc[s]
+    end
+    return nothing
+end
+
 # --- transfers -------------------------------------------------------------
 
 """
@@ -192,33 +269,8 @@ function interface_fill!(rg::TwoGrid{T}, frac::Real; layers::Integer = 3,
     @inbounds for c in 1:nfz, b in 1:nfy, a in 1:nfx
         edge = a <= L || a > nfx - L || b <= L || b > nfy - L || c <= L || c > nfz - L
         edge || continue
-
-        i0, i1 = coarse_span(rg.lo[1], a)
-        j0, j1 = coarse_span(rg.lo[2], b)
-        k0, k1 = coarse_span(rg.lo[3], c)
-
-        ρ = zero(T); ux = zero(T); uy = zero(T); uz = zero(T)
-        fill!(acc, zero(T))
-        n = 0
-        for kk in k0:k1, jj in j0:j1, ii in i0:i1
-            o = covered_offset(rg, ii, jj, kk)
-            ρa, xa, ya, za = node_nonequilibrium!(neq_a, rg.prev, o[1], o[2], o[3], T)
-            ρb, xb, yb, zb = node_nonequilibrium!(neq_b, rg.coarse, ii, jj, kk, T)
-            ρ += ρa + θ * (ρb - ρa)
-            ux += xa + θ * (xb - xa)
-            uy += ya + θ * (yb - ya)
-            uz += za + θ * (zb - za)
-            for s in 1:27
-                acc[s] += neq_a[s] + θ * (neq_b[s] - neq_a[s])
-            end
-            n += 1
-        end
-        w = one(T) / n
-        ρ *= w; ux *= w; uy *= w; uz *= w
-
-        for s in 1:27
-            rg.fine[a, b, c, s] = cube_equilibrium(s, ρ, ux, uy, uz) + rg.α * acc[s] * w
-        end
+        fill_interface_node!(rg.fine, rg.coarse, rg.prev, rg.lo, rg.α, θ,
+                             a, b, c, neq_a, neq_b, acc)
     end
     return rg
 end
@@ -269,13 +321,12 @@ function restrict!(rg::TwoGrid{T}; filtered::Bool = false, scratch = nothing) wh
                     acc[t] += w * neq[t]
                 end
             end
-        else
-            ρ, ux, uy, uz = node_nonequilibrium!(acc, rg.fine, a, b, c, T)
+            for s in 1:27
+                rg.coarse[i, j, k, s] = cube_equilibrium(s, ρ, ux, uy, uz) + invα * acc[s]
+            end
+            continue
         end
-
-        for s in 1:27
-            rg.coarse[i, j, k, s] = cube_equilibrium(s, ρ, ux, uy, uz) + invα * acc[s]
-        end
+        restrict_node!(rg.coarse, rg.fine, i, j, k, a, b, c, invα, acc)
     end
     return rg
 end

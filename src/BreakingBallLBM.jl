@@ -49,6 +49,7 @@ export LBMState, Lattice, D3Q19, D3Q27,
     cube_velocity, cube_opposite, cube_weight, cube_equilibrium,
     to_cube_order!, from_cube_order!, aa_gather!, aa_scatter!, collide_buffer!,
     aa_step_node!, aa_run!, gpu_run!, gpu_run_walls!, gpu_wall, gpu_flow, gpu_rotating_flow,
+    gpu_two_grid, gpu_refined_flow,
     gpu_copy_bandwidth, gpu_backend_loaded,
     Smagorinsky, total_relaxation_time, eddy_viscosity, nonequilibrium_flux_norm,
     strain_rate_magnitude,
@@ -66,6 +67,7 @@ export LBMState, Lattice, D3Q19, D3Q27,
     TwoGrid, fine_tau, neq_rescale, fine_force, grid_sizes,
     interface_fill!, restrict!, save_coarse!, refine_cycle!,
     init_refined!, level_macroscopic, node_macroscopic,
+    interface_nodes, fill_interface_node!, restrict_node!, coarse_span,
     RefinedFlow, refine_cycle_walls!, coarse_force, coarse_torque,
     refresh_coarse_solid!, init_refined_flow!,
     Quat, quat_from_axis_angle, rotate, unrotate, quat_rate, rotation_matrix,
@@ -138,6 +140,16 @@ Move a [`RotatingWall`](@ref) to the device, with the scratch a re-cut needs.
 Defined by the CUDA extension.
 """
 function gpu_rotating_flow end
+
+"""
+    gpu_two_grid(rg; layers)
+    gpu_refined_flow(rf; layers)
+
+Move a [`TwoGrid`](@ref) or a [`RefinedFlow`](@ref) to the device. Defined by
+the CUDA extension.
+"""
+function gpu_two_grid end
+function gpu_refined_flow end
 
 """Whether the CUDA extension has been loaded."""
 gpu_backend_loaded() = !isnothing(Base.get_extension(@__MODULE__, :BreakingBallLBMCUDAExt))

@@ -269,6 +269,58 @@ function check_recut(::Type{T}; N = 20, cycles = 6, dims = (44, 44, 44),
     return ok
 end
 
+"""
+Does the device refine the way the host does?
+
+Both levels, the force, and the mean the controller reads. The transfers are the
+only place where a value crosses between grids, so a mistake there shows up in
+the coarse level first and in the force soon after.
+"""
+function check_refine(::Type{T}; N = 4, cycles = 12) where {T}
+    geom = BaseballGeometry(; diameter = T(0.0748), seam_height = T(0.00079),
+                            seam_amplitude = T(0.7))
+    dxf = geom.radius / N
+    τc = T(0.7)
+    cdims = (24, 24, 24)
+    lo, hi = (5, 5, 5), (20, 20, 20)
+
+    rg = TwoGrid(T, cdims, lo, hi, τc)
+    wall = RotatingWall(geom, size(rg.fine)[1:3], dxf)
+    rf = RefinedFlow(rg, wall)
+    init_refined_flow!(rf, (x, y, z) -> (1.0, -0.05, 0.0, 0.0))
+
+    drf = gpu_refined_flow(rf)
+    dg = drf.grid
+    spin = (T(0), T(0), T(5e-3))
+    force = (T(1e-6), T(0), T(0))
+
+    Fh = (T(0), T(0), T(0)); Fd = Fh
+    Mh = Fh; Md = Fh
+    for _ in 1:cycles
+        Fh, Mh = advance_flow!(rg, rf, 2, τc; force = force, spin = spin, operator = :bgk)
+        Fd, Md = advance_flow!(dg, drf, 2, τc; force = force, spin = spin, operator = :bgk)
+    end
+
+    scale = maximum(abs.(rg.coarse))
+    coarse_err = maximum(abs.(Array(dg.coarse) .- rg.coarse)) / scale
+    fine_err = maximum(abs.(Array(dg.fine) .- rg.fine)) / maximum(abs.(rg.fine))
+    force_err = maximum(abs.(collect(Fd) .- collect(Fh))) / maximum(abs.(collect(Fh)))
+    torque_err = maximum(abs.(collect(Md) .- collect(Mh))) / maximum(abs.(collect(Mh)))
+
+    ρh, ūh = flow_mean_velocity(rg, rf, force)
+    ρd, ūd = flow_mean_velocity(dg, drf, force)
+    mean_err = maximum(abs.(collect(ūd) .- collect(ūh))) / 0.05
+    count_ok = flow_fluid_count(drf) == flow_fluid_count(rf)
+
+    tol = T === Float32 ? 1e-3 : 1e-10
+    ok = coarse_err < tol && fine_err < tol && force_err < tol && torque_err < tol &&
+         mean_err < tol && count_ok
+    @printf("  %-8s refine: coarse %.2e, fine %.2e, force %.2e, mean %.2e, nfluid %s  %s\n",
+            T, coarse_err, fine_err, force_err, mean_err, count_ok ? "ok" : "DIFFER",
+            ok ? "OK" : "FAILED")
+    return ok
+end
+
 """Milliseconds per re-cut on the device, at production resolution."""
 function recut_ms(::Type{T}; N = 40, repeats = 20) where {T}
     geom = BaseballGeometry(; diameter = T(0.0748), seam_height = T(0.00079),
@@ -355,6 +407,9 @@ function main()
     end
     for T in (Float64, Float32)
         ok &= check_recut(T)
+    end
+    for T in (Float64, Float32)
+        ok &= check_refine(T)
     end
     ok || error("correctness checks failed — do not trust the timings below")
     println()

@@ -79,7 +79,7 @@ function parse_args(args)
               --spinup-flowthroughs F  instead, in box flow-through times (default $(c.spinup_flowthroughs))
               --refine F           refine a box of F diameters around the ball to 2x
                                    (§6.5.1 — the only way to get a seam worth the
-                                   name in an eight-diameter domain; host only)
+                                   name in an eight-diameter domain; at least 3)
               --cpu                force the host path even if a GPU is present
               --out FILE           trajectory CSV (default $(c.out))
             Coordinates: x toward the plate, z up, y to the pitcher's left.""")
@@ -113,6 +113,7 @@ end
 """How many times the seam has been re-cut, whichever backend is carrying it."""
 recut_count(flow) = flow.recuts
 recut_count(flow::RefinedFlow) = flow.wall.recuts
+recut_count(flow::NamedTuple) = 0
 
 """Refuse a run that cannot fit, before it spends an hour finding out."""
 function plan(c::PitchConfig)
@@ -175,7 +176,6 @@ function main(args)
 
     local wall, flow, state_arg
     if c.refine > 0
-        c.device && error("the refined path is host-only for now — add --cpu")
         half = round(Int, c.refine * c.resolution / 2)
         mid = (edge + 1) ÷ 2
         clo = ntuple(_ -> mid - half, 3)
@@ -208,8 +208,14 @@ function main(args)
     local g
     if c.refine > 0
         init_refined_flow!(flow, (x, y, z) -> (1.0, u0[1], u0[2], u0[3]))
-        g = state_arg
-        println("Backend     host, two-level refinement")
+        if c.device
+            flow = gpu_refined_flow(flow)
+            g = flow.grid
+            println("Backend     CUDA, two-level refinement, ", CUDA.name(CUDA.device()))
+        else
+            g = state_arg
+            println("Backend     host, two-level refinement")
+        end
     else
         lbm = LBMState{T}(dims..., units.τ; lattice = D3Q27())
         init_equilibrium!(lbm, (i, j, k) -> (1.0, u0[1], u0[2], u0[3]))
