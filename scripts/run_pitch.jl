@@ -53,6 +53,7 @@ Base.@kwdef mutable struct PitchConfig
     report_every::Int = 200       # sub-cycles between stdout lines
     max_cycles::Int = 2_000_000
     out::String = "pitch.csv"
+    smoke::Bool = false
     device::Bool = HAS_CUDA
 end
 
@@ -80,7 +81,8 @@ function parse_args(args)
             Coordinates: x toward the plate, z up, y to the pitcher's left.""")
             exit(0)
         elseif a == "--smoke"
-            c.resolution = 12; c.domain = 4.0; c.spinup = 20
+            c.smoke = true
+            c.resolution = 12; c.domain = 4.0
             c.release = (0.0, 0.0, 1.75); c.distance = 0.4
             c.spinup_flowthroughs = 1.0
             c.report_every = 5; c.out = "pitch-smoke.csv"
@@ -119,6 +121,12 @@ function plan(c::PitchConfig)
     @printf("Lattice     tau - 1/2 = %.2e, Ma = %.3f, Re = %.3e\n",
             units.τ - 0.5, mach_number(units), lattice_reynolds(units))
     @printf("Blockage    sphere radius is %.3f of the box edge\n", budget.blockage)
+    if budget.seam_cells < 0.2 || budget.boundary_layer_cells < 0.2
+        println("\n*** The seam and the boundary layer are far below one cell here, so the")
+        println("*** coefficients this produces are a test of the plumbing, not of the")
+        println("*** aerodynamics. Expect C_D several times the real value: the sphere is")
+        println("*** a staircase at this resolution. See §6.5 for what is reachable.\n")
+    end
 
     if c.device
         free = try Int(CUDA.available_memory()) catch; Int(CUDA.totalmem(CUDA.device())) end
@@ -260,6 +268,7 @@ function main(args)
                 sum(r.CD for r in half) / length(half),
                 sum(r.CL for r in half) / length(half),
                 sum(r.Cside for r in half) / length(half))
+        c.smoke && println("  (a smoke run: these are plumbing, not aerodynamics — see above)")
         @printf("  spin %.0f -> %.0f rpm\n", c.rpm, spin_rpm(final))
         println("\nBreak measured the way a published figure means it needs the pfx")
         println("reference (§8): re-integrate from the CSV with the Magnus component")
