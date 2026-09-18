@@ -3,6 +3,7 @@ using BreakingBallLBM
 const BBL = BreakingBallLBM
 
 @testset "BreakingBallLBM" begin
+    include("test_source.jl")
     include("test_lattice.jl")
     include("test_collision.jl")
     include("test_streaming.jl")
