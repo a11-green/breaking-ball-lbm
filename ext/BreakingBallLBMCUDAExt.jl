@@ -689,8 +689,14 @@ function BreakingBallLBM.advance_flow!(dg::DeviceTwoGrid{T}, drf::DeviceRefinedF
                                        rule::Symbol = :interpolated_local,
                                        smagorinsky::Real = 0.0,
                                        omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
+                                       channel = nothing,
+                                       inlet::NTuple{3,<:Real} = (0, 0, 0),
                                        threads::Int = 128) where {T}
     iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
+    # As on the host: the buffer belongs inside the coarse half of the cycle,
+    # which is not written yet, and refusing beats running the wrong thing.
+    channel === nothing ||
+        throw(ArgumentError("open faces are not wired into the refined path yet"))
     m = dg.ratio
     Fc = T.(force)
     Ff = BBL.fine_force(Fc, m)

@@ -97,6 +97,54 @@
         @test abs(ū32[2]) < 1e-8 && abs(ū32[3]) < 1e-8
     end
 
+    @testset "the coupled loop with the faces open" begin
+        # The ball is off-centre so there is run-up ahead of it and wake behind,
+        # which is the layout an inlet and an outlet are for.
+        long = (40, 20, 20)
+        centre = (28.0, 10.5, 10.5)
+        wall_o = build_wall_field(sphere_sdf_field(T, long, R; center = centre);
+                                 sdf_fn = sphere_sdf_fn(long, R; center = centre))
+        ch = OpenChannel{T}()
+        @test open_is_clear(wall_o, ch)
+
+        function loop(chan, cycles)
+            ls = LBMState{T}(long..., units.τ; lattice = D3Q27())
+            init_equilibrium!(ls, (i, j, k) -> (1.0, -0.05, 0.0, 0.0))
+            gg = to_cube_order!(similar(ls.f), ls.f)
+            stt = PitchState(BallState(T; position = (2.0, 0.0, 1.8),
+                                       velocity = (39.0, 0.0, 0.0),
+                                       spin = spin_from_rpm((0.0, 0.0, 1.0), 2708)))
+            rr = PitchRun(units, props; substeps = 10, control_time = 200,
+                          channel = chan)
+            for _ in 1:cycles
+                couple_step!(gg, rr, stt, wall_o)
+            end
+            return gg, stt, rr
+        end
+
+        _, open_st, open_run = loop(ch, 8)
+        _, closed_st, closed_run = loop(nothing, 8)
+
+        # The controller is switched off, not merely quiet: with an inlet the
+        # stream is stated at the face, so there is nothing to integrate.
+        @test all(open_st.control .== 0)
+        @test open_st.integral == (0.0, 0.0, 0.0)
+        @test any(closed_st.control .!= 0)
+
+        # The ball is still being flown by the same force path.
+        @test open_st.force[1] != 0
+        @test sign(open_st.force[1]) == sign(closed_st.force[1])
+        @test open_st.ball.t ≈ closed_st.ball.t
+
+        # And the residual says it does not apply rather than reporting a
+        # balance that is not being maintained.
+        @test isnan(couple_residual(open_run, open_st, wall_o))
+        @test isfinite(couple_residual(closed_run, closed_st, wall_o))
+
+        # (The refined path's refusal is checked where its fixtures live, in
+        # test_refined_flow.jl.)
+    end
+
     @testset "the coupled loop barely notices single precision" begin
         # Not a tolerance chosen to pass: if the loop were precision-sensitive
         # the control signal would be the first thing to go, since it is a small

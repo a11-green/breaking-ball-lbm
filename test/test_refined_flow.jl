@@ -30,6 +30,17 @@
                                                RotatingWall(geom, (9, 9, 9), geom.radius / 6))
     end
 
+    @testset "open faces are refused rather than ignored" begin
+        # The buffer would have to be imposed on the coarse grid inside the
+        # cycle, which is not written. Silently dropping the keyword would run a
+        # periodic box while the caller believed the faces were open — the one
+        # failure mode that looks like a result.
+        rg, rf = build()
+        @test_throws ArgumentError advance_flow!(rg, rf, 2, τc;
+                                                 channel = OpenChannel{T}())
+        @test advance_flow!(rg, rf, 2, τc) isa Tuple    # without one, unchanged
+    end
+
     @testset "force and torque convert between the levels" begin
         # The same physical force, written in each level's lattice units, has to
         # agree. Force carries ρL⁴/T² and torque ρL⁵/T², so the two differ by m²

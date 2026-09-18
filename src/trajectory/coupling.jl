@@ -194,6 +194,7 @@ struct PitchRun{T<:AbstractFloat}
     omega_bulk::T
     omega_higher::T
     gravity::NTuple{3,T}
+    channel::Union{Nothing,OpenChannel{T}}
 end
 
 function PitchRun(units::LatticeUnits{T}, props::BallProperties{T};
@@ -202,14 +203,18 @@ function PitchRun(units::LatticeUnits{T}, props::BallProperties{T};
                   operator::Symbol = :central_moment,
                   rule::Symbol = :interpolated_local,
                   omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
-                  gravity::NTuple{3,<:Real} = GRAVITY) where {T}
+                  gravity::NTuple{3,<:Real} = GRAVITY,
+                  channel::Union{Nothing,OpenChannel{T}} = nothing) where {T}
     iseven(substeps) ||
         throw(ArgumentError("substeps must be even, got $substeps"))
-    control_time > substeps ||
+    # The controller is only there to hold the stream a periodic box cannot
+    # state, so with open faces its time constant is irrelevant rather than
+    # wrong — but a run that sets both has misunderstood which one is acting.
+    channel === nothing && control_time <= substeps &&
         throw(ArgumentError("control_time ($control_time) must exceed substeps ($substeps)"))
     return PitchRun{T}(units, props, Int(substeps), T(control_time), T(recut_drift),
                        T(smagorinsky), operator, rule, T(omega_bulk), T(omega_higher),
-                       T.(gravity))
+                       T.(gravity), channel)
 end
 
 """
@@ -262,10 +267,20 @@ function couple_step!(g, run::PitchRun{T}, st::PitchState{T},
     # PI, critically damped at time constant `control_time`. The integral term
     # is what supplies the steady momentum the sphere removes; the proportional
     # term is what stops the body force ringing about it.
-    e = target .- ū
-    Tc = run.control_time
-    st.integral = st.integral .+ e .* run.substeps
-    st.control = (2 / Tc) .* e .+ (1 / Tc^2) .* st.integral
+    #
+    # With open faces there is nothing for it to do. The inlet states the free
+    # stream instead of the box mean inferring it, and the momentum the ball
+    # removes leaves through the outlet instead of having to be put back — so
+    # the controller stays at zero and the only body force is the frame's own.
+    # The two remain consistent without feedback: the identity d(u∞)/dt =
+    # a_fluid (§4.4) means the interior accelerates at exactly the rate the
+    # inlet value moves between sub-cycles.
+    if run.channel === nothing
+        e = target .- ū
+        Tc = run.control_time
+        st.integral = st.integral .+ e .* run.substeps
+        st.control = (2 / Tc) .* e .+ (1 / Tc^2) .* st.integral
+    end
 
     # The seam has to be where the ball is pointing before the sub-cycle runs,
     # not after: these are the δ values the bounce-back is about to use.
@@ -282,7 +297,8 @@ function couple_step!(g, run::PitchRun{T}, st::PitchState{T},
                                  operator = run.operator, rule = run.rule,
                                  smagorinsky = run.smagorinsky,
                                  omega_bulk = run.omega_bulk,
-                                 omega_higher = run.omega_higher)
+                                 omega_higher = run.omega_higher,
+                                 channel = run.channel, inlet = target)
 
     dt = run.substeps * u.dt
     if frozen
@@ -318,6 +334,13 @@ the boundary condition and the unit conversions all agree. It is not expected to
 vanish while the flow is still developing.
 """
 function couple_residual(run::PitchRun{T}, st::PitchState{T}, flow) where {T}
+    # With open faces the balance this checks does not exist: the controller
+    # supplies nothing and the momentum leaves through the outlet. Restoring an
+    # equivalent means measuring the momentum flux through the two faces and
+    # comparing that with the surface force — a real check, and a different one,
+    # which is not written yet. A NaN says so rather than a ratio of one saying
+    # nothing.
+    run.channel === nothing || return T(NaN)
     supplied = st.control .* flow_fluid_count(flow)      # lattice force, ρ = 1
     removed = to_lattice_force(run.units, st.force)
     scale = max(sqrt(sum(abs2, removed)), eps(T))

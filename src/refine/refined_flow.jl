@@ -166,8 +166,15 @@ function advance_flow!(rg::TwoGrid{T}, rf::RefinedFlow{T}, nsteps::Integer, τ::
                        operator::Symbol = :central_moment,
                        rule::Symbol = :interpolated_local, smagorinsky::Real = 0.0,
                        omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
-                       layers::Integer = 3, filtered::Bool = false) where {T}
+                       layers::Integer = 3, filtered::Bool = false,
+                       channel = nothing,
+                       inlet::NTuple{3,<:Real} = (0, 0, 0)) where {T}
     iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
+    # Refusing is the honest answer until it is done: the buffer would have to
+    # be imposed on the coarse grid inside `refine_cycle_walls!`, which is where
+    # the coarse steps actually happen (§4.4.2.1).
+    channel === nothing ||
+        throw(ArgumentError("open faces are not wired into the refined path yet"))
     m = rg.ratio
     ωf = T.(spin) ./ m                      # ω_fine = ω_coarse / m
     scratch = ntuple(_ -> Vector{T}(undef, 27), 3)

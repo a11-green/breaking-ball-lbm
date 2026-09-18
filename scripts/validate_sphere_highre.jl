@@ -63,6 +63,8 @@
 #
 #   julia --project=. scripts/validate_sphere_highre.jl --quick
 #   julia --project=. scripts/validate_sphere_highre.jl
+#   julia --project=. scripts/validate_sphere_highre.jl --quick --open    # faces only
+#   julia --project=. scripts/validate_sphere_highre.jl --quick --domain  # sizes only
 
 using BreakingBallLBM
 using Printf
@@ -494,6 +496,76 @@ function channel_check(; device = HAS_CUDA, domain = 4.0, max_settling = 60.0,
     println()
 end
 
+"""
+With the faces open, what is left — one domain dimension at a time.
+
+The first open run answered the question it was built for and posed the next
+one. At Re = 100 the ratio went from 0.47 to 1.12 as the approach velocity went
+from 0.31 of the box mean to 0.964 of the stated inlet: the streamwise wrap was
+the error. At Re = 1000 the same change left the ratio at 1.42 with `u_in/ref`
+at 0.968 — so whatever that is, it is not the wrap.
+
+Three candidates remain, and they are separable because each has its own
+dimension to grow:
+
+  - **lateral blockage**, which an inlet does not touch: the sphere still has
+    periodic images to the sides, and confinement raises drag;
+  - **the outlet sitting in the wake**, five diameters behind a body whose wake
+    at this Reynolds number is longer than that;
+  - **resolution**, since at N/D = 20 and Re = 1000 the boundary layer is about
+    six tenths of a cell.
+
+So vary one at a time from a baseline and see which one moves the answer. A
+column that does not move is not the explanation, whatever it looked like.
+"""
+function domain_check(; device = HAS_CUDA, Re = 1000, max_settling = 60.0,
+                      base = (width = 4.0, runup = 3.0, wake = 5.0, N = 20),
+                      widths = (6.0, 8.0), wakes = (8.0, 12.0), runups = (5.0,),
+                      resolutions = (30,))
+    cases = [("baseline", base)]
+    for w in widths;       push!(cases, ("width $w D", merge(base, (width = w,)))) end
+    for w in wakes;        push!(cases, ("wake $w D", merge(base, (wake = w,)))) end
+    for r in runups;       push!(cases, ("run-up $r D", merge(base, (runup = r,)))) end
+    for n in resolutions;  push!(cases, ("N/D $n", merge(base, (N = n,)))) end
+
+    @printf("Open faces, one dimension at a time (Re = %g)\n", Re)
+    @printf("%-13s %-7s %-7s %-6s %-5s %-8s %-8s %-7s %-9s %-8s %-6s\n",
+            "changed", "width", "run-up", "wake", "N/D", "nodes/M", "C_D",
+            "ratio", "u_in/ref", "drift", "s")
+    for (label, c) in cases
+        try
+            r = drag_case(Float32; Re = Re, resolution = c.N, domain = c.width,
+                          lattice_speed = 0.05, max_settling = max_settling,
+                          device = device, channel = true,
+                          upstream = c.runup, downstream = c.wake)
+            if r.diverged
+                @printf("%-13s diverged after %d steps\n", label, r.steps)
+            else
+                nodes = r.edge_x * r.edge^2 / 1e6
+                @printf("%-13s %-7.1f %-7.1f %-6.1f %-5d %-8.2f %-8.3f %-7.2f %-9.3f %+7.2f%% %-6.0f\n",
+                        label, c.width, c.runup, c.wake, c.N, nodes, r.CD,
+                        r.CD / clift_gauvin(r.Re), r.approach, 100 * r.drift, r.seconds)
+            end
+        catch err
+            @printf("%-13s skipped (%s)\n", label,
+                    first(split(sprint(showerror, err), '\n')))
+        end
+        flush(stdout)
+    end
+    println()
+    println("Read down the ratio column against the baseline. Width moving it is lateral")
+    println("blockage, which is bought with nodes in two directions at once and is the")
+    println("expensive one. Wake moving it is the outlet sitting too close behind the body,")
+    println("which is bought in one direction and is cheap. Resolution moving it is the")
+    println("boundary layer, and that one is not a domain question at all — it is §6.5's,")
+    println("and it is the one the seam physics actually depends on.")
+    println()
+    println("A column that does not move is not the explanation, however plausible it")
+    println("looked. Watch the drift column as the domain grows: a bigger box takes longer")
+    println("to settle, so a row that stops moving may only have stopped being run.")
+    println()
+end
+
 function main(args)
     quick = "--quick" in args
     device = !("--cpu" in args) && HAS_CUDA
@@ -515,6 +587,16 @@ function main(args)
         channel_check(; device = device, domain = domain, max_settling = ft,
                       upstream = 3, downstream = quick ? 5 : 8,
                       cases = quick ? (100, 1000) : (100, 300, 1000, 1e4))
+        return
+    end
+
+    # What is left once the wrap is gone, which is where the argument stands.
+    if "--domain" in args
+        domain_check(; device = device, max_settling = ft,
+                     widths = quick ? (6.0,) : (6.0, 8.0),
+                     wakes = quick ? (10.0,) : (8.0, 12.0),
+                     runups = quick ? () : (5.0,),
+                     resolutions = quick ? (30,) : (30, 40))
         return
     end
 
