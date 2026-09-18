@@ -237,6 +237,7 @@ end
 
 BreakingBallLBM.flow_fluid_count(f::DeviceFlow) = f.nfluid
 BreakingBallLBM.flow_wall(f::DeviceFlow) = f.wall
+BreakingBallLBM.flow_recuts(::DeviceFlow) = 0
 
 function BreakingBallLBM.advance_flow!(g::CuArray{T,4}, f::DeviceFlow{T},
                                        nsteps::Integer, τ::Real; kwargs...) where {T}
@@ -499,6 +500,7 @@ BreakingBallLBM.advance_flow!(g::CuArray{T,4}, drw::DeviceRotatingFlow{T},
     BreakingBallLBM.advance_flow!(g, drw.flow, nsteps, τ; kwargs...)
 
 BreakingBallLBM.flow_wall(drw::DeviceRotatingFlow) = drw.flow.wall
+BreakingBallLBM.flow_recuts(drw::DeviceRotatingFlow) = drw.recuts
 
 BreakingBallLBM.flow_mean_velocity(g::CuArray{T,4}, drw::DeviceRotatingFlow{T},
                                    force::NTuple{3,<:Real}) where {T} =
@@ -685,6 +687,7 @@ function BreakingBallLBM.flow_mean_velocity(dg::DeviceTwoGrid{T},
 end
 
 BreakingBallLBM.flow_wall(drf::DeviceRefinedFlow) = BreakingBallLBM.flow_wall(drf.wall)
+BreakingBallLBM.flow_recuts(drf::DeviceRefinedFlow) = BreakingBallLBM.flow_recuts(drf.wall)
 
 function BreakingBallLBM.advance_flow!(dg::DeviceTwoGrid{T}, drf::DeviceRefinedFlow{T},
                                        nsteps::Integer, τ::Real;

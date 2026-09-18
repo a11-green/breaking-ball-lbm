@@ -165,6 +165,20 @@ the re-cut happens in device memory and nothing copies it back.
 """
 flow_wall(w::WallField) = w
 
+"""
+    flow_recuts(flow)
+
+How many times the seam geometry has been re-cut. Zero for geometry that cannot
+turn, which is the honest answer rather than an error: a smooth sphere is the
+same shape at every orientation (§4.1.1).
+
+Like [`flow_wall`](@ref) this exists so that a driver can ask any backend the
+same question. Leaving it to the caller to reach into whichever field happens to
+hold the count is how `DeviceRefinedFlow` came to be missed twice — the script's
+fallback read `flow.recuts`, which exists on three of the four handles.
+"""
+flow_recuts(w::WallField) = 0
+
 """How many nodes the controller's momentum is spread over."""
 flow_fluid_count(w::WallField) = count(!=(SOLID_NODE), w.kind)
 const fluid_node_count = flow_fluid_count

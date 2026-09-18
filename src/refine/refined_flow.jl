@@ -115,6 +115,7 @@ end
 
 """The wall field the fine level is solving against."""
 flow_wall(rf::RefinedFlow) = flow_wall(rf.wall)
+flow_recuts(rf::RefinedFlow) = flow_recuts(rf.wall)
 
 """
     refine_cycle_walls!(rg, wall, ...)

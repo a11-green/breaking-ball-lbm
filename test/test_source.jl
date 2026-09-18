@@ -105,6 +105,56 @@
         end
     end
 
+    @testset "the device backend answers every question the driver asks" begin
+        # A coupled run holds one of three device handles and the driver asks it
+        # all the same questions. A handle missing one of them is a MethodError
+        # or a FieldError *at the first report* — which, after a spin-up, is
+        # several minutes into a run that is then thrown away. It happened twice
+        # (`flow_wall` and `flow_recuts` on `DeviceRefinedFlow`), so it is
+        # checked here, where a GPU is not needed to notice.
+        path = joinpath(root, "ext", "BreakingBallLBMCUDAExt.jl")
+        src = read(path, String)
+
+        """The type names appearing in any signature of `fname`, across lines."""
+        function signature_types(fname)
+            types = Set{String}()
+            pat = Regex("(?:function\\s+)?BreakingBallLBM\\." * replace(fname, "!" => "!") * "\\(")
+            for m in eachmatch(pat, src)
+                i = m.offset + length(m.match) - 1   # the opening paren
+                depth = 0
+                j = i
+                while j <= lastindex(src)
+                    c = src[j]
+                    c == '(' && (depth += 1)
+                    if c == ')'
+                        depth -= 1
+                        depth == 0 && break
+                    end
+                    j = nextind(src, j)
+                end
+                for t in eachmatch(r"::\s*([A-Za-z_][A-Za-z0-9_]*)", src[i:j])
+                    push!(types, t.captures[1])
+                end
+            end
+            return types
+        end
+
+        asked = ["flow_fluid_count", "flow_mean_velocity", "advance_flow!",
+                 "flow_wall", "flow_recuts"]
+        for (handle, fns) in (("DeviceFlow", asked),
+                              ("DeviceRotatingFlow", [asked; "maybe_recut!"]),
+                              ("DeviceRefinedFlow", [asked; "maybe_recut!"]))
+            for f in fns
+                @test handle in signature_types(f) ||
+                      error("`$f` has no method naming `$handle` in $(basename(path))")
+            end
+        end
+
+        # And the check has to be able to fail, or it is decoration.
+        @test !("DeviceFlow" in signature_types("no_such_function"))
+        @test "DeviceTwoGrid" in signature_types("flow_mean_velocity")   # spans lines
+    end
+
     @testset "the package defines before it dispatches" begin
         # Across files, the order is the include list rather than the file
         # system's.

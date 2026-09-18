@@ -260,6 +260,7 @@ thousand plain distance evaluations for the classification itself. Twenty halvin
 put δ within 1e-6, on a quantity the solver clamps at 1e-3.
 """
 flow_wall(w::RotatingWall) = w.wall
+flow_recuts(w::RotatingWall) = w.recuts
 
 function recut!(rw::RotatingWall{T}, q::Quat{T}; iterations::Integer = 20) where {T}
     back = conj(q)

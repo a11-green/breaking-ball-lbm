@@ -191,11 +191,6 @@ function parse_args(args)
     return c
 end
 
-"""How many times the seam has been re-cut, whichever backend is carrying it."""
-recut_count(flow) = flow.recuts
-recut_count(flow::RefinedFlow) = flow.wall.recuts
-recut_count(flow::NamedTuple) = 0
-
 """Refuse a run that cannot fit, before it spends an hour finding out."""
 function plan(c::PitchConfig)
     T = c.precision === :f32 ? Float32 : Float64
@@ -416,6 +411,17 @@ function main(args)
     println()
 
     st = PitchState(ball)
+
+    # Ask the backend everything the reporting path will ask, once, before the
+    # long part. A handle that cannot answer one of them otherwise fails at the
+    # first report — which is after the spin-up, several minutes into a run that
+    # is then thrown away.
+    let
+        flow_recuts(flow)
+        couple_residual(run, st, flow)
+        c.snapshot > 0 && solid_mask_of(flow)
+    end
+
     print("Spin-up ($spinup sub-cycles, trajectory frozen) ... ")
     flush(stdout)
     t0 = time()
@@ -501,7 +507,7 @@ function main(args)
         if cycles % c.report_every == 0 || s.ball.x[1] >= c.distance
             @printf("%-9.4f %-8.3f %-8.4f %-8.4f %-8.2f %-7.3f %-7.3f %-7.3f %-6d %-8.3f\n",
                     s.ball.t, s.ball.x[1], s.ball.x[2], s.ball.x[3], speed(s.ball),
-                    CD, CL, Cs, recut_count(flow), couple_residual(run, s, flow))
+                    CD, CL, Cs, flow_recuts(flow), couple_residual(run, s, flow))
             flush(stdout)
         end
 
