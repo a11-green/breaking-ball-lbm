@@ -80,7 +80,12 @@ function parse_args(args)
     i = 1
     while i <= length(args)
         a = args[i]
-        take() = (i += 1; args[i])
+        # An option whose value is missing must say so. Reading past the end
+        # of `args` raises a BoundsError with a stack trace into the parser,
+        # which tells the person who typed the command nothing about the
+        # command they typed.
+        take() = i < length(args) ? (i += 1; args[i]) :
+                 error("option $a needs a value — try --help")
         if a == "--help"
             println("""
             run_pitch.jl [options]
@@ -184,14 +189,21 @@ function plan(c::PitchConfig)
             @sprintf("Smagorinsky C_s = %.2f", c.smagorinsky) :
             "none — the collision operator's own dissipation only")
     @printf("Blockage    sphere radius is %.3f of the box edge\n", budget.blockage)
+    gib_fine = 0.0
     if c.refine > 0
         fine_budget = grid_budget(; nodes_per_diameter = 2 * c.resolution,
                                   domain_diameters = c.refine)
+        # The fine patch is a second array on the device, not a view of the
+        # first, so it is the sum that has to fit. Checking the coarse level
+        # alone passed configurations that then ran out of memory partway
+        # through setup, which is the same wasted run as no check at all.
+        gib_fine = (4 * round(Int, c.refine * c.resolution / 2) + 1)^3 *
+                   (27 * sizeof(T) + 8) / 2^30
         @printf("Refined     %.1f D patch at %d/D: %d³ fine nodes, %.3f mm, seam %.2f cells\n",
                 c.refine, 2 * c.resolution, fine_budget.edge,
                 fine_budget.dx_mm, fine_budget.seam_cells)
         @printf("            %.2f GiB for the patch on top of the coarse level\n",
-                fine_budget.gib)
+                gib_fine)
         budget = fine_budget      # the warning below should judge what resolves the ball
     end
     if budget.seam_cells < 0.2 || budget.boundary_layer_cells < 0.2
@@ -201,12 +213,30 @@ function plan(c::PitchConfig)
         println("*** a staircase at this resolution. See §6.5 for what is reachable.\n")
     end
 
+    # The host path has the same failure and deserves the same answer: without a
+    # check it allocates until the operating system stops it, which on a 42 GiB
+    # ask is an OutOfMemoryError several seconds in and no indication of which
+    # option to lower.
+    if !c.device
+        free = Int(Sys.free_memory())
+        @printf("Memory      %.2f GiB free\n", free / 2^30)
+        total = gib + gib_fine
+        total > 0.85 * free / 2^30 &&
+            error("$(round(total, digits=2)) GiB" *
+                  (gib_fine > 0 ? " ($(round(gib, digits=2)) coarse + $(round(gib_fine, digits=2)) fine)" : "") *
+                  " does not fit in $(round(free / 2^30, digits=2)) GiB of free host memory — " *
+                  "lower --resolution, --domain or --refine")
+    end
+
     if c.device
         free = try Int(CUDA.available_memory()) catch; Int(CUDA.totalmem(CUDA.device())) end
         @printf("VRAM        %.2f GiB free\n", free / 2^30)
-        gib > 0.85 * free / 2^30 &&
-            error("$(round(gib, digits=2)) GiB does not fit in $(round(free / 2^30, digits=2)) GiB — " *
-                  "lower --resolution or --domain")
+        total = gib + gib_fine
+        total > 0.85 * free / 2^30 &&
+            error("$(round(total, digits=2)) GiB" *
+                  (gib_fine > 0 ? " ($(round(gib, digits=2)) coarse + $(round(gib_fine, digits=2)) fine)" : "") *
+                  " does not fit in $(round(free / 2^30, digits=2)) GiB — " *
+                  "lower --resolution, --domain or --refine")
     end
     return T, units, dims
 end

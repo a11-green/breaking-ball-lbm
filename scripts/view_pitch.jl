@@ -58,7 +58,12 @@ function parse_args(args)
     i = 1
     while i <= length(args)
         a = args[i]
-        take() = (i += 1; args[i])
+        # An option whose value is missing must say so. Reading past the end
+        # of `args` raises a BoundsError with a stack trace into the parser,
+        # which tells the person who typed the command nothing about the
+        # command they typed.
+        take() = i < length(args) ? (i += 1; args[i]) :
+                 error("option $a needs a value — try --help")
         if a == "--help"
             println("""
             view_pitch.jl [options]
