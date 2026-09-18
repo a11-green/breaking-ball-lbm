@@ -65,6 +65,7 @@
 #   julia --project=. scripts/validate_sphere_highre.jl
 #   julia --project=. scripts/validate_sphere_highre.jl --quick --open    # faces only
 #   julia --project=. scripts/validate_sphere_highre.jl --quick --domain  # sizes only
+#   julia --project=. scripts/validate_sphere_highre.jl --quick --wall    # box or wall
 
 using BreakingBallLBM
 using Printf
@@ -124,6 +125,7 @@ column rather than looking like the others.
 """
 function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
                    smagorinsky::Real = 0.0, operator::Symbol = :central_moment,
+                   rule::Symbol = :interpolated_local,
                    lattice_speed::Union{Real,Nothing} = nothing,
                    tau::Union{Real,Nothing} = nothing, window::Real = 4,
                    max_settling::Real = 80, tolerance::Real = 0.01,
@@ -259,11 +261,11 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
 
             F, _ = device ?
                 gpu_run_walls!(g, flow.wall, flow.contrib, chunk, τ; force = control,
-                               operator = operator, reduction = :mean,
+                               operator = operator, rule = rule, reduction = :mean,
                                smagorinsky = smagorinsky, channel = chan,
                                inlet = target) :
                 aa_run_walls!(g, wall, chunk, τ; force = control, operator = operator,
-                              reduction = :mean, smagorinsky = smagorinsky,
+                              rule = rule, reduction = :mean, smagorinsky = smagorinsky,
                               channel = chan, inlet = target)
             all(isfinite, F) || return (CD = T(NaN), CL = T(NaN), τ = τ,
                                         Λ = (τ - T(0.5))^2, Ma = ma, u = u,
@@ -566,6 +568,130 @@ function domain_check(; device = HAS_CUDA, Re = 1000, max_settling = 60.0,
     println()
 end
 
+"""
+Two ladders at the Reynolds number where the reference is trustworthy.
+
+`--domain` found that with the faces open at Re = 1000, widening the box moves
+the drag by 6% and refining it by 8%, while lengthening the wake moves it by
+1%. Neither of the first two is converged, and both push the same way. So the
+remaining excess is either the box that is left — the lateral images an inlet
+does not remove — or the sphere's own surface, and the two are told apart by
+which ladder moves.
+
+**The width ladder** is extrapolated rather than merely tabulated. A periodic
+array's leading correction goes as the ratio of diameter to spacing, so fitting
+the ratio against `D/L` and reading the intercept is an estimate of the same
+sphere in an unbounded stream. Three widths and a straight line is a crude
+Richardson step, and it is reported as an estimate, not a measurement.
+
+**The tau ladder is the one that was inconclusive before.** The periodic version
+of it (above) found no movement, and the reason it could not have found any is
+now clear: the wake deficit it was measuring through was several times larger
+than the effect it was looking for. With the stream stated at a face, that
+confounder is gone. If the ratio moves with tau here, the effective wall
+position is implicated — and that would explain why refining the grid moved the
+answer so much, since a wall sitting a fixed fraction of a cell off is a
+fractional radius error that shrinks as the radius grows in cells.
+"""
+function wall_check(; device = HAS_CUDA, Re = 100, max_settling = 60.0,
+                    resolution = 20, upstream = 3, downstream = 5,
+                    widths = (4.0, 6.0, 8.0), taus = (0.505, 0.52, 0.56))
+    open_case(; kwargs...) = drag_case(Float32; Re = Re, device = device,
+                                       max_settling = max_settling, channel = true,
+                                       upstream = upstream, downstream = downstream,
+                                       kwargs...)
+
+    @printf("Width, with the faces open (Re = %g, N/D = %d)\n", Re, resolution)
+    @printf("%-8s %-9s %-8s %-8s %-7s %-9s %-8s %-6s\n",
+            "width", "radius/L", "C_D", "reference", "ratio", "u_in/ref", "drift", "s")
+    xs = Float64[]; ys = Float64[]
+    for L in widths
+        try
+            r = open_case(resolution = resolution, domain = L, lattice_speed = 0.05)
+            r.diverged && (@printf("%-8.1f diverged\n", L); continue)
+            ratio = r.CD / clift_gauvin(r.Re)
+            push!(xs, 1 / L); push!(ys, ratio)
+            @printf("%-8.1f %-9.3f %-8.3f %-9.3f %-7.2f %-9.3f %+7.2f%% %-6.0f\n",
+                    L, 0.5 / L, r.CD, clift_gauvin(r.Re), ratio, r.approach,
+                    100 * r.drift, r.seconds)
+        catch err
+            @printf("%-8.1f skipped (%s)\n", L, first(split(sprint(showerror, err), '\n')))
+        end
+        flush(stdout)
+    end
+    if length(xs) >= 3
+        # Least squares through (D/L, ratio); the intercept is the unbounded
+        # estimate.
+        x̄, ȳ = sum(xs) / length(xs), sum(ys) / length(ys)
+        b = sum((xs .- x̄) .* (ys .- ȳ)) / sum((xs .- x̄) .^ 2)
+        @printf("Extrapolated to infinite width (%d points, linear in D/L): ratio -> %.3f\n",
+                length(xs), ȳ - b * x̄)
+    elseif length(xs) == 2
+        println("Two widths cannot separate the slope from the intercept, so no")
+        println("extrapolation is printed — a chord through two points at this blockage")
+        println("lands wherever the nearer point's error puts it.")
+    end
+    println()
+
+    @printf("Relaxation time, with the faces open (Re = %g, N/D = %d, width %.1f D)\n",
+            Re, resolution, first(widths))
+    @printf("%-8s %-10s %-7s %-8s %-9s %-7s %-9s %-8s %-6s\n",
+            "tau", "Lambda", "Ma", "C_D", "reference", "ratio", "u_in/ref", "drift", "s")
+    for τ in taus
+        try
+            r = open_case(resolution = resolution, domain = first(widths), tau = τ)
+            r.diverged && (@printf("%-8.3f diverged\n", τ); continue)
+            @printf("%-8.3f %-10.2e %-7.3f %-8.3f %-9.3f %-7.2f %-9.3f %+7.2f%% %-6.0f\n",
+                    r.τ, r.Λ, r.Ma, r.CD, clift_gauvin(r.Re), r.CD / clift_gauvin(r.Re),
+                    r.approach, 100 * r.drift, r.seconds)
+        catch err
+            @printf("%-8.3f skipped (%s)\n", τ, first(split(sprint(showerror, err), '\n')))
+        end
+        flush(stdout)
+    end
+    # The tau ladder cannot avoid moving the Mach number with it — Re, N and tau
+    # fix u between them — so a few percent of any movement there is
+    # compressibility rather than the wall. Swapping the bounce-back rule has no
+    # such confounder: tau, Ma, Re and N are all identical and only the wall
+    # moves, by construction. If the two rules differ by as much as refining the
+    # grid did, the wall position is the explanation and nothing else needs to be.
+    println()
+    @printf("Bounce-back rule, everything else held (Re = %g, width %.1f D)\n",
+            Re, first(widths))
+    @printf("%-20s %-6s %-8s %-9s %-7s %-9s %-8s %-6s\n",
+            "rule", "N/D", "C_D", "reference", "ratio", "u_in/ref", "drift", "s")
+    for N in (resolution, 2 * resolution), rl in (:interpolated_local, :halfway)
+        try
+            r = open_case(resolution = N, domain = first(widths), lattice_speed = 0.05,
+                          rule = rl)
+            r.diverged && (@printf("%-20s %-6d diverged\n", rl, N); continue)
+            @printf("%-20s %-6d %-8.3f %-9.3f %-7.2f %-9.3f %+7.2f%% %-6.0f\n",
+                    rl, N, r.CD, clift_gauvin(r.Re), r.CD / clift_gauvin(r.Re),
+                    r.approach, 100 * r.drift, r.seconds)
+        catch err
+            @printf("%-20s %-6d skipped (%s)\n", rl, N,
+                    first(split(sprint(showerror, err), '\n')))
+        end
+        flush(stdout)
+    end
+    println()
+    println("If the width ladder extrapolates near one, the sphere is right and everything")
+    println("left was the box — at this Reynolds number, where the reference is good to a")
+    println("few percent and the boundary layer is a fifth of a diameter rather than a")
+    println("hundredth, so resolution is not the limit.")
+    println()
+    println("If the tau ladder moves, the wall is not where it is nominally put, and the")
+    println("resolution sensitivity at Re = 1000 has an explanation that is about the")
+    println("boundary condition rather than about the flow. If it does not move, then the")
+    println("resolution sensitivity is the boundary layer being under-resolved, which is")
+    println("§6.5's problem and the one the seam physics depends on — and the honest")
+    println("conclusion is that N/D = 20 is not enough at Re = 1000, never mind at 2e5.")
+    println()
+    println("Read the rule table before the tau one: it asks the same question without the")
+    println("Mach number changing underneath it, and a gap there is the cleaner evidence.")
+    println()
+end
+
 function main(args)
     quick = "--quick" in args
     device = !("--cpu" in args) && HAS_CUDA
@@ -587,6 +713,15 @@ function main(args)
         channel_check(; device = device, domain = domain, max_settling = ft,
                       upstream = 3, downstream = quick ? 5 : 8,
                       cases = quick ? (100, 1000) : (100, 300, 1000, 1e4))
+        return
+    end
+
+    # Which of the two live knobs is the remaining error, at the Reynolds
+    # number where the reference can adjudicate.
+    if "--wall" in args
+        wall_check(; device = device, max_settling = ft,
+                   widths = quick ? (4.0, 6.0, 8.0) : (4.0, 6.0, 8.0, 12.0),
+                   taus = quick ? (0.505, 0.52, 0.56) : (0.505, 0.51, 0.52, 0.56))
         return
     end
 
