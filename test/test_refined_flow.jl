@@ -30,15 +30,48 @@
                                                RotatingWall(geom, (9, 9, 9), geom.radius / 6))
     end
 
-    @testset "open faces are refused rather than ignored" begin
-        # The buffer would have to be imposed on the coarse grid inside the
-        # cycle, which is not written. Silently dropping the keyword would run a
-        # periodic box while the caller believed the faces were open — the one
-        # failure mode that looks like a result.
+    @testset "open faces reach the coarse level" begin
+        # The domain boundary belongs to the coarse grid; the fine patch sits
+        # around the ball, several diameters inside, and never touches a face.
+        # A cycle advances the coarse level by exactly the pair the buffer is
+        # imposed on, so the channel goes to that `aa_run!` and nowhere else.
+        ch = OpenChannel{T}()
+        stream = (-0.05, 0.0, 0.0)
+
+        # The stream the faces state is still a fixed point with a patch in the
+        # middle of it — refinement included, and with the ball there, only away
+        # from the ball. Checked on the buffer and on the far face, which is
+        # where a wrapped population would arrive.
         rg, rf = build()
-        @test_throws ArgumentError advance_flow!(rg, rf, 2, τc;
-                                                 channel = OpenChannel{T}())
-        @test advance_flow!(rg, rf, 2, τc) isa Tuple    # without one, unchanged
+        before = copy(rg.coarse)
+        advance_flow!(rg, rf, 8, τc; channel = ch, inlet = stream)
+        faces = vcat(1:4, (cdims[1] - 3):cdims[1])
+        @test maximum(abs.(rg.coarse[faces, :, :, :] .- before[faces, :, :, :])) < 1e-12
+
+        # Over this window the channel is a no-op on the *whole* coarse level,
+        # ball and patch included — not only at the faces. That is the fixed
+        # point again and it is the right answer here: the ball's disturbance
+        # travels at the sound speed, about five cells in eight steps, so it has
+        # not reached a face yet and there is nothing for the faces to do
+        # differently. What the channel changes is what happens when it does
+        # arrive, which is what the wrap test below puts there by hand.
+        rg2, rf2 = build()
+        advance_flow!(rg2, rf2, 8, τc)
+        @test maximum(abs.(rg2.coarse .- rg.coarse)) < 1e-12
+
+        # The wrap is cut on the coarse level: a disturbance parked in the
+        # outlet buffer does not arrive at the inlet end.
+        rg3, rf3 = build()
+        rg3.coarse[2, :, :, :] .*= 1.5
+        clean = copy(rg3.coarse)
+        far = (cdims[1] - 4):cdims[1]
+        advance_flow!(rg3, rf3, 8, τc; channel = ch, inlet = stream)
+        @test maximum(abs.(rg3.coarse[far, :, :, :] .- clean[far, :, :, :])) < 1e-12
+
+        rg4, rf4 = build()
+        rg4.coarse[2, :, :, :] .*= 1.5
+        advance_flow!(rg4, rf4, 8, τc)
+        @test maximum(abs.(rg4.coarse[far, :, :, :] .- clean[far, :, :, :])) > 1e-9
     end
 
     @testset "force and torque convert between the levels" begin

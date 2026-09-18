@@ -113,6 +113,9 @@ function flow_mean_velocity(rg::TwoGrid{T}, rf::RefinedFlow{T},
     return T(ρtot / n), (T(mx / ρtot), T(my / ρtot), T(mz / ρtot))
 end
 
+"""The wall field the fine level is solving against."""
+flow_wall(rf::RefinedFlow) = flow_wall(rf.wall)
+
 """
     refine_cycle_walls!(rg, wall, ...)
 
@@ -127,14 +130,17 @@ function refine_cycle_walls!(rg::TwoGrid{T}, wall::RotatingWall{T};
                              smagorinsky::Real = 0.0,
                              layers::Integer = 3, filtered::Bool = false,
                              omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
+                             channel = nothing, inlet::NTuple{3,<:Real} = (0, 0, 0),
                              scratch = ntuple(_ -> Vector{T}(undef, 27), 3)) where {T}
     Fc = T.(force)
     Ff = fine_force(Fc, rg.ratio)
     ωf = T.(spin)
 
+    # The faces are the coarse level's (see `refine_cycle!`), and a cycle
+    # advances it by the pair the buffer is imposed on.
     save_coarse!(rg)
     aa_run!(rg.coarse, 2, rg.τc; force = Fc, operator = operator,
-            smagorinsky = smagorinsky,
+            smagorinsky = smagorinsky, channel = channel, inlet = inlet,
             omega_bulk = omega_bulk, omega_higher = omega_higher)
 
     sF = (zero(T), zero(T), zero(T))
@@ -170,11 +176,6 @@ function advance_flow!(rg::TwoGrid{T}, rf::RefinedFlow{T}, nsteps::Integer, τ::
                        channel = nothing,
                        inlet::NTuple{3,<:Real} = (0, 0, 0)) where {T}
     iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
-    # Refusing is the honest answer until it is done: the buffer would have to
-    # be imposed on the coarse grid inside `refine_cycle_walls!`, which is where
-    # the coarse steps actually happen (§4.4.2.1).
-    channel === nothing ||
-        throw(ArgumentError("open faces are not wired into the refined path yet"))
     m = rg.ratio
     ωf = T.(spin) ./ m                      # ω_fine = ω_coarse / m
     scratch = ntuple(_ -> Vector{T}(undef, 27), 3)
@@ -187,6 +188,7 @@ function advance_flow!(rg::TwoGrid{T}, rf::RefinedFlow{T}, nsteps::Integer, τ::
                                    operator = operator, rule = rule,
                                    smagorinsky = smagorinsky,
                                    layers = layers, filtered = filtered,
+                                   channel = channel, inlet = inlet,
                                    omega_bulk = omega_bulk, omega_higher = omega_higher,
                                    scratch = scratch)
         sF = sF .+ F

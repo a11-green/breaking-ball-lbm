@@ -684,6 +684,8 @@ function BreakingBallLBM.flow_mean_velocity(dg::DeviceTwoGrid{T},
                                T((mz + half * Float64(force[3])) / ρ))
 end
 
+BreakingBallLBM.flow_wall(drf::DeviceRefinedFlow) = BreakingBallLBM.flow_wall(drf.wall)
+
 function BreakingBallLBM.advance_flow!(dg::DeviceTwoGrid{T}, drf::DeviceRefinedFlow{T},
                                        nsteps::Integer, τ::Real;
                                        force::NTuple{3,<:Real} = (0, 0, 0),
@@ -696,10 +698,6 @@ function BreakingBallLBM.advance_flow!(dg::DeviceTwoGrid{T}, drf::DeviceRefinedF
                                        inlet::NTuple{3,<:Real} = (0, 0, 0),
                                        threads::Int = 128) where {T}
     iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
-    # As on the host: the buffer belongs inside the coarse half of the cycle,
-    # which is not written yet, and refusing beats running the wrong thing.
-    channel === nothing ||
-        throw(ArgumentError("open faces are not wired into the refined path yet"))
     m = dg.ratio
     Fc = T.(force)
     Ff = BBL.fine_force(Fc, m)
@@ -711,8 +709,11 @@ function BreakingBallLBM.advance_flow!(dg::DeviceTwoGrid{T}, drf::DeviceRefinedF
     cycles = nsteps ÷ 2
     for _ in 1:cycles
         BreakingBallLBM.save_coarse!(dg)
+        # The faces are the coarse level's, and a cycle advances it by exactly the
+        # pair the buffer is imposed on (see `refine_cycle!`).
         BreakingBallLBM.gpu_run!(dg.coarse, 2, dg.τc; force = Fc, operator = operator,
                                  smagorinsky = smagorinsky,
+                                 channel = channel, inlet = inlet,
                                  omega_bulk = omega_bulk, omega_higher = omega_higher,
                                  threads = threads)
         for half in 1:2

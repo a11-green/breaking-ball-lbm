@@ -357,13 +357,20 @@ function refine_cycle!(rg::TwoGrid{T}; force::NTuple{3,<:Real} = (0, 0, 0),
                        operator::Symbol = :central_moment, smagorinsky::Real = 0.0,
                        layers::Integer = 3, filtered::Bool = false,
                        omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
+                       channel = nothing, inlet::NTuple{3,<:Real} = (0, 0, 0),
                        scratch = ntuple(_ -> Vector{T}(undef, 27), 3)) where {T}
     Fc = T.(force)
     Ff = fine_force(Fc, rg.ratio)
 
+    # **Open faces belong to the coarse level and only to it.** The domain
+    # boundary is the coarse grid's boundary; the fine patch sits around the
+    # ball, several diameters inside, and never touches a face. And the cadence
+    # is already right: a cycle advances the coarse level by exactly two steps,
+    # which is the pair `OpenChannel` is imposed on, so handing the channel to
+    # this `aa_run!` puts the buffer exactly where the uniform path puts it.
     save_coarse!(rg)
     aa_run!(rg.coarse, 2, rg.τc; force = Fc, operator = operator,
-            smagorinsky = smagorinsky,
+            smagorinsky = smagorinsky, channel = channel, inlet = inlet,
             omega_bulk = omega_bulk, omega_higher = omega_higher)
 
     for half in 1:2

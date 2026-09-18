@@ -216,9 +216,6 @@ function main(args)
     c.distance > c.release[1] ||
         error("the plate (--distance $(c.distance)) is behind the release point " *
               "(--release x = $(c.release[1]))")
-    c.open_faces && c.refine > 0 &&
-        error("--open and --refine cannot be combined yet: the face buffer has to be " *
-              "imposed on the coarse grid inside the refinement cycle (§4.4.2.1)")
     T, units, dims = plan(c)
     edge = dims[2]
     # The stream runs along -x, so upstream is the high-x end: that is where the
@@ -237,11 +234,22 @@ function main(args)
     spin_lat = lattice_spin(units, ball)
 
     local wall, flow, state_arg
+    clo = (1, 1, 1)                      # the patch's corner, in coarse indices
     if c.refine > 0
+        # The patch goes where the ball is, which with open faces is not the
+        # middle of the grid: `RotatingWall` centres the ball in the patch, so a
+        # patch centred on the box would quietly move the ball there and the
+        # run-up would not be the one asked for.
         half = round(Int, c.refine * c.resolution / 2)
-        mid = (edge + 1) ÷ 2
-        clo = ntuple(_ -> mid - half, 3)
-        chi = ntuple(_ -> mid + half, 3)
+        mid = round.(Int, centre3)
+        clo = ntuple(d -> mid[d] - half, 3)
+        chi = ntuple(d -> mid[d] + half, 3)
+        if c.open_faces
+            depth = OpenChannel{T}().depth
+            (clo[1] > depth + 1 && chi[1] < dims[1] - depth) ||
+                error("the refined patch reaches a face buffer: raise --upstream/" *
+                      "--downstream or lower --refine")
+        end
         grid = TwoGrid(T, dims, clo, chi, units.τ)
         wall = RotatingWall(geom, size(grid.fine)[1:3], units.dx / 2)
         flow = RefinedFlow(grid, wall)
@@ -267,7 +275,11 @@ function main(args)
     end
 
     channel = c.open_faces ? OpenChannel{T}() : nothing
-    if channel !== nothing && !open_is_clear(flow_wall(wall), channel)
+    # On the uniform path the wall field *is* the domain, so the geometry can be
+    # asked directly. On the refined one the wall lives in the patch and the
+    # faces belong to the coarse level, which is what the patch check above
+    # covers instead.
+    if channel !== nothing && c.refine == 0 && !open_is_clear(flow_wall(wall), channel)
         error("the ball reaches into a face buffer — raise --upstream or --downstream")
     end
     nsub = min(max_substeps(flow, spin_lat, c.recut_drift), 100)
@@ -355,18 +367,22 @@ function main(args)
 
     function snapshot!(s, tag)
         c.snapshot > 0 || return
-        if c.refine > 0
-            snapshots == 0 &&
-                println("  (snapshots of the refined path are not written yet: the " *
-                        "fine patch and the coarse level are separate grids)")
-            snapshots += 1
-            return
-        end
+        # On the refined path the snapshot is of the *fine* level. It is the one
+        # that resolves the ball, and the crop — a couple of diameters about the
+        # ball — lies inside the patch by construction, since the patch has to
+        # be at least three diameters for the restriction to have room (§6.5.1).
+        # The coarse level outside it is the free stream doing very little.
+        level = c.refine > 0 ? g.fine : g
+        spacing = c.refine > 0 ? units.dx / 2 : units.dx
+        origin = c.refine > 0 ? T.((clo .- 1) .* units.dx) : (zero(T), zero(T), zero(T))
+        ctr = c.refine > 0 ? (size(g.fine)[1:3] .+ 1) ./ 2 : centre3
+        crop = c.snapshot_crop * c.resolution * (c.refine > 0 ? 2 : 1)
+
         name = @sprintf("flow-%05d.vtk", tag)
         path = joinpath(c.snapshot_dir, name)
-        write_snapshot(path, g, solid_mask_of(flow);
-                       crop = c.snapshot_crop * c.resolution, centre = centre3,
-                       stride = c.snapshot_stride, spacing = units.dx,
+        write_snapshot(path, level, solid_mask_of(flow);
+                       crop = crop, centre = ctr,
+                       stride = c.snapshot_stride, spacing = spacing, origin = origin,
                        title = @sprintf("t = %.4f s, |V| = %.2f m/s", s.ball.t,
                                         speed(s.ball)))
         push!(series, (name, Float64(s.ball.t)))
