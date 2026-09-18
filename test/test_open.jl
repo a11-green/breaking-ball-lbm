@@ -3,10 +3,11 @@
     τ = 0.6
     dims = (24, 8, 8)
 
-    """A uniform stream along -x, in cube-slot order."""
-    function uniform(ux; ρ = 1.0, d = dims)
+    """A uniform stream, in cube-slot order. A scalar means along -x."""
+    function uniform(u; ρ = 1.0, d = dims)
+        v = u isa Tuple ? u : (u, 0.0, 0.0)
         s = LBMState{T}(d..., τ; lattice = D3Q27())
-        init_equilibrium!(s, (i, j, k) -> (ρ, ux, 0.0, 0.0))
+        init_equilibrium!(s, (i, j, k) -> (ρ, v[1], v[2], v[3]))
         return to_cube_order!(similar(s.f), s.f)
     end
 
@@ -20,6 +21,51 @@
         before = copy(g)
         aa_run!(g, 40, τ; channel = ch, inlet = (u, 0.0, 0.0))
         @test maximum(abs.(g .- before)) < 1e-14
+    end
+
+    @testset "an oblique stream is a fixed point too" begin
+        # There is one inlet face, and the stream it has to state does not stay
+        # perpendicular to it: over a flight the ball's velocity turns by about
+        # eight degrees, gravity and the break together, so `u_in` acquires
+        # transverse components.
+        #
+        # One face is enough for that **because the lateral faces are
+        # periodic**: a uniform transverse component leaves one side and arrives
+        # at the other, which is consistent, so an oblique uniform stream is an
+        # exact solution of inlet(+x) + outlet(-x) + periodic(y,z). With walls
+        # or slip conditions on the sides it would not be, and more inlet faces
+        # would be needed.
+        tilted = (-0.05, -0.00386, 0.00529)     # 8.3°, the tilt measured at the plate
+        ch = OpenChannel{T}()
+
+        g = uniform(tilted)
+        before = copy(g)
+        aa_run!(g, 200, τ; channel = ch, inlet = tilted, operator = :bgk)
+        @test maximum(abs.(g .- before)) < 1e-13
+
+        # The central-moment operator moves the same field by about 4e-6 — and
+        # moves it by *the same amount in a periodic box*, because its
+        # equilibrium differs from the second-order one this was initialised
+        # from in exactly the cubic terms that vanish when the velocity is
+        # axis-aligned. ρ and u are conserved by collision, so what settles is
+        # the higher moments, not the flow. Comparing the two boxes is the
+        # tolerance-free way to say the boundary is not the cause.
+        open_run, wrap_run = uniform(tilted), uniform(tilted)
+        aa_run!(open_run, 200, τ; channel = ch, inlet = tilted)
+        aa_run!(wrap_run, 200, τ)
+        @test maximum(abs.(open_run .- wrap_run)) < 1e-13
+        @test maximum(abs.(wrap_run .- before)) > 1e-7
+        @test BBL.node_macroscopic(open_run, 12, 6, 6, T)[2] ≈ tilted[1] rtol = 1e-8
+
+        # A steep tilt is a fixed point as well, so it is not the faces that
+        # limit how far the stream may turn. What limits it is the wake leaving
+        # sideways: at `downstream * tan(θ)` beyond half the width, the wake
+        # reaches the lateral images, which is a domain-size question.
+        steep = (-0.0433, 0.0, 0.025)           # 30°
+        h = uniform(steep)
+        h0 = copy(h)
+        aa_run!(h, 200, τ; channel = ch, inlet = steep, operator = :bgk)
+        @test maximum(abs.(h .- h0)) < 1e-13
     end
 
     @testset "the wrap is cut, and only the wrap" begin
