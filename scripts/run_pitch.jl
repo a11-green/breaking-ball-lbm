@@ -64,6 +64,14 @@ Base.@kwdef mutable struct PitchConfig
     snapshot_dir::String = "snapshots"
     smoke::Bool = false
     refine::Float64 = 0.0         # fine-patch edge in diameters; 0 = uniform grid
+    # Open streamwise faces (§4.4.2.1). Without them the box is periodic and
+    # the ball flies through its own wake, which V&V-2 measured as the largest
+    # error in the whole configuration — the stream arriving at the ball was a
+    # third of what the controller was holding. `domain` then sets the lateral
+    # width only, and the box stops being a cube.
+    open_faces::Bool = false
+    upstream::Float64 = 3.0       # run-up ahead of the ball, in diameters
+    downstream::Float64 = 8.0     # wake behind it
     device::Bool = HAS_CUDA
 end
 
@@ -97,6 +105,11 @@ function parse_args(args)
               --snapshot-crop D    half-width written, in diameters (default $(c.snapshot_crop))
               --snapshot-stride S  write every S-th node (default $(c.snapshot_stride))
               --snapshot-dir DIR   where they go (default $(c.snapshot_dir))
+              --open               inlet and outlet instead of a periodic wrap, so
+                                   the ball is not flying through its own wake
+                                   (§4.4.2.1); --domain then sets the width only
+              --upstream D         run-up ahead of the ball with --open (default $(c.upstream))
+              --downstream D       wake behind it with --open (default $(c.downstream))
             Coordinates: x toward the plate, z up, y to the pitcher's left.""")
             exit(0)
         elseif a == "--smoke"
@@ -122,6 +135,9 @@ function parse_args(args)
         elseif a == "--snapshot-crop"; c.snapshot_crop = parse(Float64, take())
         elseif a == "--snapshot-stride"; c.snapshot_stride = parse(Int, take())
         elseif a == "--snapshot-dir"; c.snapshot_dir = take()
+        elseif a == "--open";       c.open_faces = true
+        elseif a == "--upstream";   c.upstream = parse(Float64, take())
+        elseif a == "--downstream"; c.downstream = parse(Float64, take())
         else
             error("unknown option $a — try --help")
         end
@@ -140,12 +156,26 @@ function plan(c::PitchConfig)
     T = c.precision === :f32 ? Float32 : Float64
     units = LatticeUnits(T; nodes_per_diameter = c.resolution, speed = c.speed)
     edge = round(Int, c.resolution * c.domain)
-    nodes = edge^3
+    # With open faces the streamwise direction is run-up plus wake rather than
+    # the lateral width, so the box is a duct and not a cube.
+    edge_x = c.open_faces ? round(Int, c.resolution * (c.upstream + c.downstream)) : edge
+    dims = (edge_x, edge, edge)
+    nodes = prod(dims)
     gib = nodes * (27 * sizeof(T) + 8) / 2^30      # populations, kind, mask
     budget = grid_budget(; nodes_per_diameter = c.resolution, domain_diameters = c.domain)
 
-    @printf("Grid        %d³ = %.1f M nodes, %.2f GiB (%s)%s\n",
-            edge, nodes / 1e6, gib, T, c.refine > 0 ? ", coarse level" : "")
+    if c.open_faces
+        @printf("Grid        %d x %d x %d = %.1f M nodes, %.2f GiB (%s)%s\n",
+                edge_x, edge, edge, nodes / 1e6, gib, T,
+                c.refine > 0 ? ", coarse level" : "")
+        @printf("Faces       inlet and outlet: %.1f D of run-up, %.1f D of wake\n",
+                c.upstream, c.downstream)
+    else
+        @printf("Grid        %d³ = %.1f M nodes, %.2f GiB (%s)%s\n",
+                edge, nodes / 1e6, gib, T, c.refine > 0 ? ", coarse level" : "")
+        println("Faces       periodic — the ball flies through its own wake (§4.4.2.1); " *
+                "--open changes that")
+    end
     @printf("Spacing     %.3f mm — seam ridge %.2f cells, boundary layer %.2f cells\n",
             budget.dx_mm, budget.seam_cells, budget.boundary_layer_cells)
     @printf("Lattice     tau - 1/2 = %.2e, Ma = %.3f, Re = %.3e\n",
@@ -178,7 +208,7 @@ function plan(c::PitchConfig)
             error("$(round(gib, digits=2)) GiB does not fit in $(round(free / 2^30, digits=2)) GiB — " *
                   "lower --resolution or --domain")
     end
-    return T, units, edge
+    return T, units, dims
 end
 
 function main(args)
@@ -186,8 +216,17 @@ function main(args)
     c.distance > c.release[1] ||
         error("the plate (--distance $(c.distance)) is behind the release point " *
               "(--release x = $(c.release[1]))")
-    T, units, edge = plan(c)
-    dims = (edge, edge, edge)
+    c.open_faces && c.refine > 0 &&
+        error("--open and --refine cannot be combined yet: the face buffer has to be " *
+              "imposed on the coarse grid inside the refinement cycle (§4.4.2.1)")
+    T, units, dims = plan(c)
+    edge = dims[2]
+    # The stream runs along -x, so upstream is the high-x end: that is where the
+    # inlet goes and the ball sits `upstream` diameters below it.
+    centre3 = c.open_faces ?
+        (T(dims[1] - round(Int, c.upstream * c.resolution)),
+         T(edge + 1) / 2, T(edge + 1) / 2) :
+        T.((dims .+ 1) ./ 2)
 
     geom = BaseballGeometry(; diameter = T(0.0748), seam_height = T(0.00079),
                             seam_amplitude = T(0.7))
@@ -208,16 +247,20 @@ function main(args)
         flow = RefinedFlow(grid, wall)
         state_arg = grid
     else
-        wall = RotatingWall(geom, dims, units.dx)
+        wall = RotatingWall(geom, dims, units.dx; center = centre3)
         flow = wall
         state_arg = nothing
+    end
+    channel = c.open_faces ? OpenChannel{T}() : nothing
+    if channel !== nothing && !open_is_clear(flow_wall(wall), channel)
+        error("the ball reaches into a face buffer — raise --upstream or --downstream")
     end
     nsub = min(max_substeps(flow, spin_lat, c.recut_drift), 100)
     run = PitchRun(units, props; substeps = nsub, control_time = 40 * nsub,
                    recut_drift = c.recut_drift, smagorinsky = c.smagorinsky,
-                   operator = c.operator, rule = c.rule)
+                   operator = c.operator, rule = c.rule, channel = channel)
 
-    flowthrough = edge / units.lattice_speed            # steps for the box to convect once
+    flowthrough = dims[1] / units.lattice_speed         # steps for the box to convect once
     spinup = c.spinup > 0 ? c.spinup :
              max(1, round(Int, c.spinup_flowthroughs * flowthrough / nsub))
     @printf("Sub-cycle   %d steps (surface turns %.4f spacings per step)\n",
@@ -283,7 +326,7 @@ function main(args)
         mkpath(c.snapshot_dir)
         path = joinpath(c.snapshot_dir, @sprintf("flow-%s.vtk", tag))
         write_snapshot(path, g, solid_mask_of(flow);
-                       crop = c.snapshot_crop * c.resolution,
+                       crop = c.snapshot_crop * c.resolution, centre = centre3,
                        stride = c.snapshot_stride, spacing = units.dx,
                        title = @sprintf("t = %.4f s, |V| = %.2f m/s, %s",
                                         s.ball.t, speed(s.ball), tag))
