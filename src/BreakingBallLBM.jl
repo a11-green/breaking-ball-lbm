@@ -12,6 +12,8 @@ geometry of the ball.
 """
 module BreakingBallLBM
 
+using TOML
+
 include("trajectory/quaternion.jl")
 include("core/lattice.jl")
 include("core/state.jl")
@@ -39,6 +41,7 @@ include("refine/two_grid.jl")
 include("postprocess/fields.jl")
 include("postprocess/pitch_view.jl")
 include("postprocess/vtk.jl")
+include("config.jl")
 include("refine/refined_flow.jl")
 include("validation/sphere_array.jl")
 
@@ -75,6 +78,7 @@ export LBMState, Lattice, D3Q19, D3Q27,
     PITCH_TYPES, pitch_family, at_time, plate_box, coefficient_series,
     velocity_field, density_field, magnitude, velocity_gradient,
     write_vtk, write_snapshot, snapshot_box,
+    load_settings!, settings_toml, coerce_setting,
     vorticity, q_criterion, field_limits, slice_field,
     interface_nodes, fill_interface_node!, restrict_node!, coarse_span,
     RefinedFlow, refine_cycle_walls!, coarse_force, coarse_torque,

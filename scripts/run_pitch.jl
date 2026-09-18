@@ -75,8 +75,43 @@ Base.@kwdef mutable struct PitchConfig
     device::Bool = HAS_CUDA
 end
 
+# Settings files live in the library (`src/config.jl`) because they decide what
+# physics a run performs, and a script is code the test suite cannot reach. What
+# is left here is the file name and the two places the run uses it.
+
+"""
+The commit this ran from, and whether the tree had uncommitted changes.
+
+A pasted log is only a complete description of a run if it says which code
+produced it. Shelling out to git is best-effort: a checkout without git, or a
+copy of the sources outside a repository, says so rather than failing.
+"""
+function code_version()
+    try
+        sha = readchomp(`git -C $(dirname(@__DIR__)) rev-parse --short HEAD`)
+        dirty = !isempty(readchomp(`git -C $(dirname(@__DIR__)) status --porcelain`))
+        return sha * (dirty ? "-dirty" : "")
+    catch
+        return "unknown"
+    end
+end
+
+"""Apply a TOML file to a configuration; an unknown key is an error."""
+load_config!(c::PitchConfig, path::AbstractString) = load_settings!(c, path)
+
+"""The configuration as TOML — the same text `--config` accepts."""
+config_toml(c::PitchConfig) = settings_toml(c)
+
 function parse_args(args)
     c = PitchConfig()
+    # The file is read before the loop below, so an option typed on the command
+    # line always beats the same setting in the file — which is the order that
+    # makes `--config base.toml --resolution 50` mean what it looks like.
+    for (n, a) in enumerate(args)
+        a == "--config" || continue
+        n < length(args) || error("option --config needs a value — try --help")
+        load_config!(c, args[n + 1])
+    end
     i = 1
     while i <= length(args)
         a = args[i]
@@ -110,6 +145,10 @@ function parse_args(args)
               --snapshot-crop D    half-width written, in diameters (default $(c.snapshot_crop))
               --snapshot-stride S  write every S-th node (default $(c.snapshot_stride))
               --snapshot-dir DIR   where they go (default $(c.snapshot_dir))
+              --config FILE        read settings from a TOML file first; anything
+                                   also given on the command line wins. Every
+                                   setting a run resolves is written back out,
+                                   so a previous run's file can be re-run
               --open               inlet and outlet instead of a periodic wrap, so
                                    the ball is not flying through its own wake
                                    (§4.4.2.1); --domain then sets the width only
@@ -140,6 +179,7 @@ function parse_args(args)
         elseif a == "--snapshot-crop"; c.snapshot_crop = parse(Float64, take())
         elseif a == "--snapshot-stride"; c.snapshot_stride = parse(Int, take())
         elseif a == "--snapshot-dir"; c.snapshot_dir = take()
+        elseif a == "--config";     take()          # already applied, above
         elseif a == "--open";       c.open_faces = true
         elseif a == "--upstream";   c.upstream = parse(Float64, take())
         elseif a == "--downstream"; c.downstream = parse(Float64, take())
@@ -243,6 +283,27 @@ end
 
 function main(args)
     c = parse_args(args)
+
+    # **The run states its own inputs, at the top, before anything can fail.**
+    # A log that begins with this is a complete description of what produced it:
+    # every setting after the presets and the overrides have been applied, in
+    # the form the reader accepts, so the run can be repeated from its own log.
+    @printf("Version     %s, julia %s, %s\n\n", code_version(), VERSION,
+            Libc.strftime("%Y-%m-%d %H:%M:%S", time()))
+    config_path = splitext(c.out)[1] * "-config.toml"
+    body = config_toml(c)
+    println("Configuration (", config_path, ", re-run with --config)")
+    for line in split(rstrip(body), '\n')
+        println("  ", line)
+    end
+    println()
+    try
+        write(config_path, "# Written by run_pitch.jl; feed back with --config.\n" * body)
+    catch err
+        @printf("  (could not write %s: %s)\n", config_path,
+                first(split(sprint(showerror, err), '\n')))
+    end
+
     c.distance > c.release[1] ||
         error("the plate (--distance $(c.distance)) is behind the release point " *
               "(--release x = $(c.release[1]))")

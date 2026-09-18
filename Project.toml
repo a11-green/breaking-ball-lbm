@@ -3,6 +3,9 @@ uuid = "43c67187-11ee-42cb-b648-a46700a2c615"
 authors = ["breaking-ball-lbm contributors"]
 version = "0.1.0"
 
+[deps]
+TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+
 [weakdeps]
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
