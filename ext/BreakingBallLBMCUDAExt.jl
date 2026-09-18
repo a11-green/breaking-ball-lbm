@@ -236,6 +236,8 @@ function BreakingBallLBM.gpu_flow(wall::BBL.WallField{T}) where {T}
 end
 
 BreakingBallLBM.flow_fluid_count(f::DeviceFlow) = f.nfluid
+BreakingBallLBM.flow_wall(f::DeviceFlow) = f.wall
+BreakingBallLBM.flow_wall(d::DeviceRotatingFlow) = d.flow.wall
 
 function BreakingBallLBM.advance_flow!(g::CuArray{T,4}, f::DeviceFlow{T},
                                        nsteps::Integer, τ::Real; kwargs...) where {T}

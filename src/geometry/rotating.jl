@@ -259,6 +259,8 @@ roughly seven solid links on each of the boundary nodes, against a couple of
 thousand plain distance evaluations for the classification itself. Twenty halvings
 put δ within 1e-6, on a quantity the solver clamps at 1e-3.
 """
+flow_wall(w::RotatingWall) = w.wall
+
 function recut!(rw::RotatingWall{T}, q::Quat{T}; iterations::Integer = 20) where {T}
     back = conj(q)
     shape = BallShape(rw.geom)

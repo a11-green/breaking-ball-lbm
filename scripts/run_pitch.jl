@@ -53,6 +53,15 @@ Base.@kwdef mutable struct PitchConfig
     report_every::Int = 200       # sub-cycles between stdout lines
     max_cycles::Int = 2_000_000
     out::String = "pitch.csv"
+    # Snapshots: sub-cycles between them, 0 for none. A production array is
+    # gigabytes, so what is written is a box around the ball — which in the
+    # ball-following frame is the middle of the grid and stays there — thinned
+    # by `snapshot_stride` after the derivatives have been taken on the full
+    # grid, so the vorticity is the grid's own and not a coarser grid's.
+    snapshot::Int = 0
+    snapshot_crop::Float64 = 2.0      # half-width in diameters
+    snapshot_stride::Int = 1
+    snapshot_dir::String = "snapshots"
     smoke::Bool = false
     refine::Float64 = 0.0         # fine-patch edge in diameters; 0 = uniform grid
     device::Bool = HAS_CUDA
@@ -84,6 +93,10 @@ function parse_args(args)
                                    dissipation (default $(c.smagorinsky))
               --cpu                force the host path even if a GPU is present
               --out FILE           trajectory CSV (default $(c.out))
+              --snapshot N         write a flow-field snapshot every N sub-cycles
+              --snapshot-crop D    half-width written, in diameters (default $(c.snapshot_crop))
+              --snapshot-stride S  write every S-th node (default $(c.snapshot_stride))
+              --snapshot-dir DIR   where they go (default $(c.snapshot_dir))
             Coordinates: x toward the plate, z up, y to the pitcher's left.""")
             exit(0)
         elseif a == "--smoke"
@@ -105,6 +118,10 @@ function parse_args(args)
         elseif a == "--smagorinsky"; c.smagorinsky = parse(Float64, take())
         elseif a == "--cpu";        c.device = false
         elseif a == "--out";        c.out = take()
+        elseif a == "--snapshot";   c.snapshot = parse(Int, take())
+        elseif a == "--snapshot-crop"; c.snapshot_crop = parse(Float64, take())
+        elseif a == "--snapshot-stride"; c.snapshot_stride = parse(Int, take())
+        elseif a == "--snapshot-dir"; c.snapshot_dir = take()
         else
             error("unknown option $a — try --help")
         end
@@ -242,15 +259,37 @@ function main(args)
     flush(stdout)
     t0 = time()
     res = spin_up!(g, run, st, flow; cycles = spinup)
-    @printf("done in %.0f s, momentum residual %.3f\n\n", time() - t0, res)
+    @printf("done in %.0f s, momentum residual %.3f\n", time() - t0, res)
 
     rows = NamedTuple[]
-    @printf("%-9s %-8s %-8s %-8s %-8s %-7s %-7s %-7s %-6s %-8s\n",
-            "t (s)", "x (m)", "y (m)", "z (m)", "|V|", "C_D", "C_L", "C_side", "cuts",
-            "residual")
     t1 = time()
     cycles = 0
     stopped = :plate
+
+    # A snapshot is written from the same array the solver is using, in the even
+    # layout `fly!` leaves it in between sub-cycles, and the geometry is read
+    # back from whichever backend holds it — after a re-cut on the device, the
+    # host copy of the wall is no longer where the ball is.
+    snapshots = 0
+    function snapshot!(s, tag)
+        c.snapshot > 0 || return
+        if c.refine > 0
+            snapshots == 0 &&
+                println("  (snapshots of the refined path are not written yet: the " *
+                        "fine patch and the coarse level are separate grids)")
+            snapshots += 1
+            return
+        end
+        mkpath(c.snapshot_dir)
+        path = joinpath(c.snapshot_dir, @sprintf("flow-%s.vtk", tag))
+        write_snapshot(path, g, solid_mask_of(flow);
+                       crop = c.snapshot_crop * c.resolution,
+                       stride = c.snapshot_stride, spacing = units.dx,
+                       title = @sprintf("t = %.4f s, |V| = %.2f m/s, %s",
+                                        s.ball.t, speed(s.ball), tag))
+        snapshots += 1
+        return path
+    end
 
     function sample!(s)
         cycles += 1
@@ -261,6 +300,10 @@ function main(args)
                      Fx = s.force[1], Fy = s.force[2], Fz = s.force[3],
                      Tx = s.torque[1], Ty = s.torque[2], Tz = s.torque[3],
                      rpm = spin_rpm(s.ball), steps = s.steps, fresh = s.fresh))
+
+        if c.snapshot > 0 && cycles % c.snapshot == 0
+            snapshot!(s, @sprintf("%05d", cycles))
+        end
 
         if cycles % c.report_every == 0 || s.ball.x[1] >= c.distance
             @printf("%-9.4f %-8.3f %-8.4f %-8.4f %-8.2f %-7.3f %-7.3f %-7.3f %-6d %-8.3f\n",
@@ -282,6 +325,17 @@ function main(args)
         s.ball.x[1] < c.distance
     end
 
+    # The flow after spin-up is the first one worth looking at: the wake has
+    # reached its own length and the trajectory has not started moving yet.
+    if c.snapshot > 0
+        p0 = snapshot!(st, "spinup")
+        p0 === nothing || println("Snapshot    ", p0)
+    end
+    println()
+
+    @printf("%-9s %-8s %-8s %-8s %-8s %-7s %-7s %-7s %-6s %-8s\n",
+            "t (s)", "x (m)", "y (m)", "z (m)", "|V|", "C_D", "C_L", "C_side", "cuts",
+            "residual")
     fly!(g, run, st, flow; cycles = c.max_cycles, callback = sample!)
     wall_time = time() - t1
 

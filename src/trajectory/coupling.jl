@@ -155,6 +155,16 @@ end
 # interface this narrow is what lets `couple_step!` be one function rather than
 # two that have to be kept in agreement.
 
+"""
+    flow_wall(flow)
+
+The `WallField` a backend is currently solving against — host or device, plain
+or rotating. A snapshot needs it to know where the body is *now*, which after a
+re-cut is not where the host copy of the geometry thinks it is: on the device
+the re-cut happens in device memory and nothing copies it back.
+"""
+flow_wall(w::WallField) = w
+
 """How many nodes the controller's momentum is spread over."""
 flow_fluid_count(w::WallField) = count(!=(SOLID_NODE), w.kind)
 const fluid_node_count = flow_fluid_count

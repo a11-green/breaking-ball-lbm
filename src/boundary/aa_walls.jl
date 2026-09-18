@@ -45,6 +45,16 @@ end
 
 const SOLID_NODE = Int32(-1)
 
+"""
+The solid nodes as a Bool array, from whatever is holding the geometry.
+
+Broadcast rather than a loop so it works unchanged on a device array, where the
+result stays on the device and a crop of it can be taken before anything is
+copied back.
+"""
+solid_mask_of(w::WallField) = w.kind .== SOLID_NODE
+solid_mask_of(w) = solid_mask_of(flow_wall(w))
+
 Base.length(w::WallField) = size(w.deltas, 2)
 
 """

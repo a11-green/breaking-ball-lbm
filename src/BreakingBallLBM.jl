@@ -38,6 +38,7 @@ include("trajectory/coupling.jl")
 include("refine/two_grid.jl")
 include("postprocess/fields.jl")
 include("postprocess/pitch_view.jl")
+include("postprocess/vtk.jl")
 include("refine/refined_flow.jl")
 include("validation/sphere_array.jl")
 
@@ -73,6 +74,7 @@ export LBMState, Lattice, D3Q19, D3Q27,
     TrajectorySamples, samples, break_references, seam_world, spin_axis_world,
     PITCH_TYPES, pitch_family, at_time, plate_box, coefficient_series,
     velocity_field, density_field, magnitude, velocity_gradient,
+    write_vtk, write_snapshot, snapshot_box,
     vorticity, q_criterion, field_limits, slice_field,
     interface_nodes, fill_interface_node!, restrict_node!, coarse_span,
     RefinedFlow, refine_cycle_walls!, coarse_force, coarse_torque,
@@ -95,6 +97,7 @@ export LBMState, Lattice, D3Q19, D3Q27,
     PLATE_DISTANCE, PFX_SEGMENT, simulate_trajectory, state_at_distance,
     PitchMetrics, pitch_metrics, inches,
     mean_fluid_velocity, region_mean_velocity, fluid_node_count, to_lattice_force,
+    flow_wall, solid_mask_of,
     OpenChannel, apply_open!, open_node!, open_is_clear, inlet_source, outlet_source,
     flow_fluid_count, advance_flow!, flow_mean_velocity,
     PitchRun, PitchState, couple_step!, couple_residual, spin_up!, fly!

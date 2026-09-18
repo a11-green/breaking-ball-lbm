@@ -34,6 +34,9 @@ Nodes where the signed-distance field is negative.
 """
 solid_mask(ϕ::Array{T,3}) where {T} = ϕ .< 0
 
+"""The solid nodes of a wall field, host or device, as a Bool array."""
+solid_mask(w) = solid_mask_of(w)
+
 """
     refine_delta(sdf_fn, i, j, k, q, δ0; iterations = 40)
 
