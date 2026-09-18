@@ -251,6 +251,21 @@ function main(args)
         flow = wall
         state_arg = nothing
     end
+    # Clear this run's own output before writing any: a directory holding two
+    # runs' frames is the interleaving above, and a stale frame is worse than a
+    # missing one because it looks like a result. Only the names this script
+    # writes are touched, and the count is reported.
+    if c.snapshot > 0
+        mkpath(c.snapshot_dir)
+        stale = filter(f -> occursin(r"^flow-\d+\.vtk$", f) || f == "flow.vtk.series",
+                       readdir(c.snapshot_dir))
+        if !isempty(stale)
+            foreach(f -> rm(joinpath(c.snapshot_dir, f)), stale)
+            @printf("Snapshots   removed %d stale frame%s from %s\n",
+                    length(stale), length(stale) == 1 ? "" : "s", c.snapshot_dir)
+        end
+    end
+
     channel = c.open_faces ? OpenChannel{T}() : nothing
     if channel !== nothing && !open_is_clear(flow_wall(wall), channel)
         error("the ball reaches into a face buffer — raise --upstream or --downstream")
@@ -313,7 +328,31 @@ function main(args)
     # layout `fly!` leaves it in between sub-cycles, and the geometry is read
     # back from whichever backend holds it — after a re-cut on the device, the
     # host copy of the wall is no longer where the ball is.
+    # **The series file, and why it is not optional.** A viewer handed a
+    # directory of numbered files groups them by name and calls the index the
+    # time. Two runs writing into the same directory at different cadences then
+    # interleave: the shorter run's frames survive at the indices the longer one
+    # never wrote, and the animation cuts between two different simulations
+    # while looking like one. So the run states its own frames, in physical
+    # seconds, and the viewer is given that list instead of a wildcard.
     snapshots = 0
+    series = Tuple{String,Float64}[]
+    series_path = joinpath(c.snapshot_dir, "flow.vtk.series")
+
+    function write_series()
+        open(series_path, "w") do io
+            println(io, "{")
+            println(io, "  \"file-series-version\" : \"1.0\",")
+            println(io, "  \"files\" : [")
+            for (n, (name, t)) in enumerate(series)
+                @printf(io, "    { \"name\" : \"%s\", \"time\" : %.6f }%s\n",
+                        name, t, n == length(series) ? "" : ",")
+            end
+            println(io, "  ]")
+            println(io, "}")
+        end
+    end
+
     function snapshot!(s, tag)
         c.snapshot > 0 || return
         if c.refine > 0
@@ -323,13 +362,17 @@ function main(args)
             snapshots += 1
             return
         end
-        mkpath(c.snapshot_dir)
-        path = joinpath(c.snapshot_dir, @sprintf("flow-%s.vtk", tag))
+        name = @sprintf("flow-%05d.vtk", tag)
+        path = joinpath(c.snapshot_dir, name)
         write_snapshot(path, g, solid_mask_of(flow);
                        crop = c.snapshot_crop * c.resolution, centre = centre3,
                        stride = c.snapshot_stride, spacing = units.dx,
-                       title = @sprintf("t = %.4f s, |V| = %.2f m/s, %s",
-                                        s.ball.t, speed(s.ball), tag))
+                       title = @sprintf("t = %.4f s, |V| = %.2f m/s", s.ball.t,
+                                        speed(s.ball)))
+        push!(series, (name, Float64(s.ball.t)))
+        # Rewritten after every frame, so a run that is interrupted still leaves
+        # a series that names exactly the frames it managed to write.
+        write_series()
         snapshots += 1
         return path
     end
@@ -345,7 +388,7 @@ function main(args)
                      rpm = spin_rpm(s.ball), steps = s.steps, fresh = s.fresh))
 
         if c.snapshot > 0 && cycles % c.snapshot == 0
-            snapshot!(s, @sprintf("%05d", cycles))
+            snapshot!(s, cycles)
         end
 
         if cycles % c.report_every == 0 || s.ball.x[1] >= c.distance
@@ -371,8 +414,9 @@ function main(args)
     # The flow after spin-up is the first one worth looking at: the wake has
     # reached its own length and the trajectory has not started moving yet.
     if c.snapshot > 0
-        p0 = snapshot!(st, "spinup")
-        p0 === nothing || println("Snapshot    ", p0)
+        # Frame zero, numbered rather than named, so it sorts where it belongs.
+        p0 = snapshot!(st, 0)
+        p0 === nothing || println("Snapshot    ", p0, "  (series: ", series_path, ")")
     end
     println()
 
