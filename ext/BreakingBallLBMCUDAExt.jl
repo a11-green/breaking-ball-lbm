@@ -689,6 +689,10 @@ end
 BreakingBallLBM.flow_wall(drf::DeviceRefinedFlow) = BreakingBallLBM.flow_wall(drf.wall)
 BreakingBallLBM.flow_recuts(drf::DeviceRefinedFlow) = BreakingBallLBM.flow_recuts(drf.wall)
 
+# The device keeps the *fluid* mask, because that is what the reduction weights
+# by; the accessor's contract is solid, so it inverts.
+BreakingBallLBM.flow_coarse_solid(drf::DeviceRefinedFlow) = drf.coarse_mask .== 0
+
 function BreakingBallLBM.advance_flow!(dg::DeviceTwoGrid{T}, drf::DeviceRefinedFlow{T},
                                        nsteps::Integer, τ::Real;
                                        force::NTuple{3,<:Real} = (0, 0, 0),

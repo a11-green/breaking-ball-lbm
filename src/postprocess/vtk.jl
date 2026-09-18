@@ -132,9 +132,13 @@ function write_snapshot(path::AbstractString, g, solid::AbstractArray{Bool,3};
         (ntuple(d -> 1:dims[d], 3), ntuple(_ -> (0, 0), 3)) :
         snapshot_box(dims, c, crop)
 
-    # One copy off the device, of the crop only.
-    block = Array(g[ranges[1], ranges[2], ranges[3], :])
-    mask = Array(solid[ranges[1], ranges[2], ranges[3]])
+    # One copy off the device, of the crop only — or of the whole thing when
+    # that is what was asked for, without slicing first: indexing a device array
+    # builds the slice *on the device*, and a full-size temporary is the one
+    # allocation an 8 GB card holding the run has no room for.
+    whole = all(d -> ranges[d] == 1:dims[d], 1:3)
+    block = whole ? Array(g) : Array(g[ranges[1], ranges[2], ranges[3], :])
+    mask = whole ? Array(solid) : Array(solid[ranges[1], ranges[2], ranges[3]])
 
     u = velocity_field(block; mask = mask)
     q = q_criterion(u)

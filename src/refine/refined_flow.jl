@@ -118,6 +118,20 @@ flow_wall(rf::RefinedFlow) = flow_wall(rf.wall)
 flow_recuts(rf::RefinedFlow) = flow_recuts(rf.wall)
 
 """
+    flow_coarse_solid(flow)
+
+The ball's footprint on the *coarse* level, **true where solid**.
+
+The coarse level has no wall geometry of its own — it is solved straight through
+the ball and overwritten from the fine patch every cycle — so the footprint is
+carried separately. The two backends store it with opposite polarity (the host
+keeps solid flags, the device keeps the fluid mask its reduction needs), which
+is exactly the sort of difference a caller should not have to know: this returns
+one convention.
+"""
+flow_coarse_solid(rf::RefinedFlow) = rf.coarse_solid
+
+"""
     refine_cycle_walls!(rg, wall, ...)
 
 One cycle — two coarse steps, four fine ones — with the ball on the fine level.

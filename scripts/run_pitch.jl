@@ -62,6 +62,12 @@ Base.@kwdef mutable struct PitchConfig
     snapshot_crop::Float64 = 2.0      # half-width in diameters
     snapshot_stride::Int = 1
     snapshot_dir::String = "snapshots"
+    # One picture of the whole box, rather than the few diameters around the
+    # ball the time series carries. It answers a different question — where the
+    # wake goes, how far it is from the faces, where the refined patch sits —
+    # and it answers it once, so it can afford to be the whole domain.
+    overview::Bool = false
+    overview_stride::Int = 4
     smoke::Bool = false
     refine::Float64 = 0.0         # fine-patch edge in diameters; 0 = uniform grid
     # Open streamwise faces (§4.4.2.1). Without them the box is periodic and
@@ -145,6 +151,11 @@ function parse_args(args)
               --snapshot-crop D    half-width written, in diameters (default $(c.snapshot_crop))
               --snapshot-stride S  write every S-th node (default $(c.snapshot_stride))
               --snapshot-dir DIR   where they go (default $(c.snapshot_dir))
+              --overview           also write one snapshot of the whole domain after
+                                   spin-up: the box, the wake to the outlet, and
+                                   where the refined patch sits
+              --overview-stride S  thinning for that one (default $(c.overview_stride); the whole
+                                   coarse grid unthinned is about a gigabyte)
               --config FILE        read settings from a TOML file first; anything
                                    also given on the command line wins. Every
                                    setting a run resolves is written back out,
@@ -179,6 +190,8 @@ function parse_args(args)
         elseif a == "--snapshot-crop"; c.snapshot_crop = parse(Float64, take())
         elseif a == "--snapshot-stride"; c.snapshot_stride = parse(Int, take())
         elseif a == "--snapshot-dir"; c.snapshot_dir = take()
+        elseif a == "--overview";   c.overview = true
+        elseif a == "--overview-stride"; c.overview_stride = parse(Int, take())
         elseif a == "--config";     take()          # already applied, above
         elseif a == "--open";       c.open_faces = true
         elseif a == "--upstream";   c.upstream = parse(Float64, take())
@@ -351,7 +364,9 @@ function main(args)
     # writes are touched, and the count is reported.
     if c.snapshot > 0
         mkpath(c.snapshot_dir)
-        stale = filter(f -> occursin(r"^flow-\d+\.vtk$", f) || f == "flow.vtk.series",
+        stale = filter(f -> occursin(r"^flow-\d+\.vtk$", f) ||
+                            occursin(r"^overview-\w+\.vtk$", f) ||
+                            f == "flow.vtk.series",
                        readdir(c.snapshot_dir))
         if !isempty(stale)
             foreach(f -> rm(joinpath(c.snapshot_dir, f)), stale)
@@ -490,6 +505,39 @@ function main(args)
         return path
     end
 
+    """
+    One picture of the whole domain, levels and all.
+
+    Separate from the time series because it is a different geometry: the series
+    is a few diameters about the ball at the fine spacing, this is the box. The
+    levels are written as separate files so a viewer can show both at once — the
+    fine block's extent is where the patch is, which is half of what there is to
+    see.
+    """
+    function overview!(s)
+        c.overview || return
+        mkpath(c.snapshot_dir)
+        written = String[]
+        levels = c.refine > 0 ?
+            [("coarse", g.coarse, flow_coarse_solid(flow), units.dx,
+              (zero(T), zero(T), zero(T))),
+             ("fine", g.fine, solid_mask_of(flow), units.dx / 2,
+              T.((clo .- 1) .* units.dx))] :
+            [("domain", g, solid_mask_of(flow), units.dx,
+              (zero(T), zero(T), zero(T)))]
+        for (name, level, mask, spacing, origin) in levels
+            path = joinpath(c.snapshot_dir, "overview-$name.vtk")
+            write_snapshot(path, level, mask; crop = nothing,
+                           stride = c.overview_stride, spacing = spacing,
+                           origin = origin,
+                           title = @sprintf("%s level, whole domain, t = %.4f s",
+                                            name, s.ball.t))
+            push!(written, @sprintf("%s (%.0f MB)", path, filesize(path) / 1e6))
+        end
+        println("Overview    ", join(written, ", "))
+        return written
+    end
+
     function sample!(s)
         cycles += 1
         CD, CL, Cs = aerodynamic_coefficients(s.force, s.ball, props)
@@ -531,6 +579,7 @@ function main(args)
         p0 = snapshot!(st, 0)
         p0 === nothing || println("Snapshot    ", p0, "  (series: ", series_path, ")")
     end
+    overview!(st)
     println()
 
     @printf("%-9s %-8s %-8s %-8s %-8s %-7s %-7s %-7s %-6s %-8s\n",

@@ -101,7 +101,7 @@ export LBMState, Lattice, D3Q19, D3Q27,
     PLATE_DISTANCE, PFX_SEGMENT, simulate_trajectory, state_at_distance,
     PitchMetrics, pitch_metrics, inches,
     mean_fluid_velocity, region_mean_velocity, fluid_node_count, to_lattice_force,
-    flow_wall, flow_recuts, solid_mask_of,
+    flow_wall, flow_recuts, flow_coarse_solid, solid_mask_of,
     OpenChannel, apply_open!, open_node!, open_is_clear, inlet_source, outlet_source,
     flow_fluid_count, advance_flow!, flow_mean_velocity,
     PitchRun, PitchState, couple_step!, couple_residual, spin_up!, fly!
