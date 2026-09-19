@@ -730,13 +730,22 @@ function wall_check(; device = HAS_CUDA, Re = 100, max_settling = 60.0,
     # at N/D = 20 is already six minutes, and at 30 it is closer to forty-five.
     # Going the other way costs a minute and tests the same monotonicity, so the
     # quick path coarsens and a full run can be given the finer pair instead.
+    #
+    # The two smallest taus, not the ends of the ladder above. Ma is fixed by Re,
+    # N and tau between them, so it falls as 1/N — and the large-tau end is where
+    # Ma is big enough to matter (0.173 at N/D = 20, 0.267 at 13). Its Ma² error
+    # would then shrink with resolution all on its own and narrow the spread for
+    # a reason that has nothing to do with truncation, which is the one thing
+    # this ladder must not let happen. At 0.505 and 0.52 both rows are under
+    # Ma = 0.09 at every N here, so what moves is not compressibility.
     @printf("Relaxation time against resolution (Re = %g, width %.1f D)\n",
             Re, first(widths))
     @printf("%-6s %-8s %-7s %-10s %-8s %-9s %-7s %-9s %-8s %-6s\n",
             "N/D", "tau", "Ma", "Lambda", "C_D", "reference", "ratio", "u_in/ref",
             "drift", "s")
     spread = Dict{Int,Vector{Float64}}()
-    for N in resolutions, τ in (first(taus), last(taus))
+    pair = length(taus) >= 2 ? (taus[1], taus[2]) : (first(taus), last(taus))
+    for N in resolutions, τ in pair
         try
             r = open_case(resolution = N, domain = first(widths), tau = τ)
             r.diverged && (@printf("%-6d %-8.3f diverged\n", N, τ); continue)
@@ -763,15 +772,17 @@ function wall_check(; device = HAS_CUDA, Re = 100, max_settling = 60.0,
     println("few percent and the boundary layer is a fifth of a diameter rather than a")
     println("hundredth, so resolution is not the limit.")
     println()
-    println("If the tau ladder moves, the wall is not where it is nominally put, and the")
-    println("resolution sensitivity at Re = 1000 has an explanation that is about the")
-    println("boundary condition rather than about the flow. If it does not move, then the")
-    println("resolution sensitivity is the boundary layer being under-resolved, which is")
-    println("§6.5's problem and the one the seam physics depends on — and the honest")
-    println("conclusion is that N/D = 20 is not enough at Re = 1000, never mind at 2e5.")
+    println("The tau ladder moves, and the wall is not why — that was checked directly")
+    println("and is the paragraph below. Read the rule table before it: the rule swap")
+    println("asks the same question with tau, Ma, Re and N all held, so a gap there is")
+    println("the cleaner evidence, and it halving when Delta x halves is a wall position")
+    println("converging at first order rather than a systematic that stays.")
     println()
-    println("Read the rule table before the tau one: it asks the same question without the")
-    println("Mach number changing underneath it, and a gap there is the cleaner evidence.")
+    println("What the resolution rows say about the production regime is separate and")
+    println("harder: the boundary layer is a fifth of a diameter here and a hundredth at")
+    println("Re = 2e5, so a resolution that suffices at Re = 100 says nothing about one")
+    println("that suffices there. That is §6.5's problem and the one the seam physics")
+    println("depends on.")
     println()
     println("The Lambda column is printed because TRT names it, not because it explains")
     println("anything here: the Poiseuille wall fit in test/test_boundary.jl puts this")
