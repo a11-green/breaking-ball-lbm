@@ -17,6 +17,7 @@ const BBL = BreakingBallLBM
     include("test_turbulence.jl")
     include("test_taylor_green.jl")
     include("test_refine.jl")
+    include("test_multi_grid.jl")
     include("test_refined_flow.jl")
     include("test_fields.jl")
     include("test_vtk.jl")

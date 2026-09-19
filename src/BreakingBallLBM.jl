@@ -38,6 +38,7 @@ include("trajectory/aero_model.jl")
 include("trajectory/trajectory.jl")
 include("trajectory/coupling.jl")
 include("refine/two_grid.jl")
+include("refine/multi_grid.jl")
 include("postprocess/fields.jl")
 include("postprocess/pitch_view.jl")
 include("postprocess/vtk.jl")
@@ -71,7 +72,9 @@ export LBMState, Lattice, D3Q19, D3Q27,
     TaylorGreen, PoiseuilleChannel, poiseuille_velocity, poiseuille_peak, channel_sdf,
     sphere_sdf_field, sphere_sdf_fn, exact_sphere_delta,
     hasimoto_factor, stokes_drag, superficial_velocity,
-    TwoGrid, fine_tau, neq_rescale, fine_force, grid_sizes,
+    TwoGrid, fine_tau, neq_rescale, fine_force, grid_sizes, check_patch,
+    GridChain, levels, level_taus, base_grid, finest_grid, chain_sizes,
+    chain_cycle_walls!, chain_force, chain_torque, init_chain!, level_origin,
     interface_fill!, restrict!, save_coarse!, refine_cycle!,
     init_refined!, level_macroscopic, node_macroscopic,
     TrajectorySamples, samples, break_references, seam_world, spin_axis_world,

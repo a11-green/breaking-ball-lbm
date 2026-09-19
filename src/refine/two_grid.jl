@@ -102,18 +102,44 @@ neq_rescale(τc::T, τf::T, ratio::Integer) where {T} = (τf / τc) / ratio
 function TwoGrid(::Type{T}, coarse_dims::NTuple{3,<:Integer},
                  lo::NTuple{3,<:Integer}, hi::NTuple{3,<:Integer}, τc::Real;
                  ratio::Integer = 2) where {T<:AbstractFloat}
-    ratio == 2 || throw(ArgumentError("only a refinement ratio of 2 is implemented, got $ratio"))
-    all(hi .> lo) || throw(ArgumentError("the fine patch must have positive extent"))
-    all(lo .>= 2) && all(hi .<= coarse_dims .- 1) ||
-        throw(ArgumentError("the fine patch must leave a coarse node on every side: " *
-                            "lo = $lo, hi = $hi, dims = $coarse_dims"))
-
+    check_patch(NTuple{3,Int}(coarse_dims), lo, hi, ratio)
     fine_dims = ntuple(d -> ratio * (hi[d] - lo[d]) + 1, 3)
     τf = T(fine_tau(τc, ratio))
     return TwoGrid{T}(zeros(T, coarse_dims..., 27), zeros(T, fine_dims..., 27),
                       T(τc), τf, Int.(lo), Int.(hi), Int(ratio),
                       T(neq_rescale(T(τc), τf, ratio)),
                       zeros(T, (hi .- lo .+ 1)..., 27))
+end
+
+"""
+    TwoGrid(coarse, lo, hi, τc; ratio = 2)
+
+A pair whose coarse level **is** an existing array rather than a fresh one.
+
+This is what chains levels: the array is shared, not copied, so a step taken on
+it by the pair above is already visible here. Nothing else differs from the
+constructor above.
+"""
+function TwoGrid(coarse::Array{T,4}, lo::NTuple{3,<:Integer}, hi::NTuple{3,<:Integer},
+                 τc::Real; ratio::Integer = 2) where {T<:AbstractFloat}
+    dims = NTuple{3,Int}(size(coarse)[1:3])
+    check_patch(dims, lo, hi, ratio)
+    fine_dims = ntuple(d -> ratio * (hi[d] - lo[d]) + 1, 3)
+    τf = T(fine_tau(τc, ratio))
+    return TwoGrid{T}(coarse, zeros(T, fine_dims..., 27), T(τc), τf,
+                      Int.(lo), Int.(hi), Int(ratio),
+                      T(neq_rescale(T(τc), τf, ratio)),
+                      zeros(T, (hi .- lo .+ 1)..., 27))
+end
+
+"""The patch has to fit, with a coarse node to spare on every side."""
+function check_patch(dims::NTuple{3,Int}, lo, hi, ratio::Integer)
+    ratio == 2 || throw(ArgumentError("only a refinement ratio of 2 is implemented, got $ratio"))
+    all(hi .> lo) || throw(ArgumentError("the fine patch must have positive extent"))
+    all(lo .>= 2) && all(hi .<= dims .- 1) ||
+        throw(ArgumentError("the fine patch must leave a coarse node on every side: " *
+                            "lo = $lo, hi = $hi, dims = $dims"))
+    return nothing
 end
 
 """Node count on each level, and how much of the coarse grid the patch covers."""
