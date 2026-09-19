@@ -426,6 +426,61 @@ function mlups(::Type{T}, n::Int, operator::Symbol; target_seconds = 2.0,
     end
 end
 
+"""
+Does a chain of three levels agree between host and device?
+
+The chain shares its arrays between levels, so a device port that copied them
+instead would still *run* — each pair would solve a flow of its own and the
+answer would drift apart slowly. Comparing every level against the host after a
+dozen cycles is what catches that; comparing only the force would not.
+"""
+function check_chain(::Type{T}; N = 4, cycles = 8) where {T}
+    geom = BaseballGeometry(; diameter = T(0.0748), seam_height = T(0.00079),
+                            seam_amplitude = T(0.7))
+    τc = T(0.7)
+    cdims = (24, 24, 24)
+    p1 = ((5, 5, 5), (20, 20, 20))
+    probe = GridChain(T, cdims, [p1], τc)
+    f1 = size(probe.levels[1].fine)[1:3]
+    p2 = ((f1[1] ÷ 4, f1[2] ÷ 4, f1[3] ÷ 4),
+          (3 * f1[1] ÷ 4, 3 * f1[2] ÷ 4, 3 * f1[3] ÷ 4))
+
+    ch = GridChain(T, cdims, [p1, p2], τc)
+    wall = RotatingWall(geom, size(finest_grid(ch))[1:3], geom.radius / N)
+    cf = ChainFlow(ch, wall)
+    init_chain_flow!(cf, (x, y, z) -> (1.0, -0.05, 0.0, 0.0))
+
+    dcf = gpu_chain_flow(cf)
+    dch = dcf.chain
+    spin = (T(0), T(0), T(5e-3))
+    force = (T(1e-6), T(0), T(0))
+
+    Fh = (T(0), T(0), T(0)); Fd = Fh; Mh = Fh; Md = Fh
+    for _ in 1:cycles
+        Fh, Mh = advance_flow!(ch, cf, 2, τc; force = force, spin = spin, operator = :bgk)
+        Fd, Md = advance_flow!(dch, dcf, 2, τc; force = force, spin = spin, operator = :bgk)
+    end
+
+    errs = Float64[]
+    for (h, d) in zip(levels(ch), levels(dch))
+        push!(errs, maximum(abs.(Array(d) .- h)) / maximum(abs.(h)))
+    end
+    force_err = maximum(abs.(collect(Fd) .- collect(Fh))) / maximum(abs.(collect(Fh)))
+    torque_err = maximum(abs.(collect(Md) .- collect(Mh))) / maximum(abs.(collect(Mh)))
+    _, ūh = flow_mean_velocity(ch, cf, force)
+    _, ūd = flow_mean_velocity(dch, dcf, force)
+    mean_err = maximum(abs.(collect(ūd) .- collect(ūh))) / 0.05
+    count_ok = flow_fluid_count(dcf) == flow_fluid_count(cf)
+
+    tol = T === Float32 ? 1e-3 : 1e-10
+    ok = maximum(errs) < tol && force_err < tol && torque_err < tol &&
+         mean_err < tol && count_ok
+    @printf("  %-8s chain:  levels %s, force %.2e, torque %.2e, mean %.2e, nfluid %s  %s\n",
+            T, join((@sprintf("%.1e", e) for e in errs), "/"), force_err, torque_err,
+            mean_err, count_ok ? "ok" : "DIFFER", ok ? "OK" : "FAILED")
+    return ok
+end
+
 function main()
     if !gpu_backend_loaded()
         error("the CUDA extension did not load — check that CUDA.jl and StaticArrays are installed")
@@ -458,6 +513,9 @@ function main()
     end
     for T in (Float64, Float32)
         ok &= check_refine(T)
+    end
+    for T in (Float64, Float32)
+        ok &= check_chain(T)
     end
     ok || error("correctness checks failed — do not trust the timings below")
     println()

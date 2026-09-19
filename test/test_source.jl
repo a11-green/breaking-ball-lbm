@@ -141,9 +141,14 @@
 
         asked = ["flow_fluid_count", "flow_mean_velocity", "advance_flow!",
                  "flow_wall", "flow_recuts"]
+        # A handle that carries a patch also answers where the ball's footprint
+        # is on the level the box mean is taken over, and how long a sub-cycle
+        # may be — the driver calls both.
+        patched = [asked; "maybe_recut!"; "max_substeps"; "flow_coarse_solid"]
         for (handle, fns) in (("DeviceFlow", asked),
                               ("DeviceRotatingFlow", [asked; "maybe_recut!"]),
-                              ("DeviceRefinedFlow", [asked; "maybe_recut!"]))
+                              ("DeviceRefinedFlow", patched),
+                              ("DeviceChainFlow", patched))
             for f in fns
                 @test handle in signature_types(f) ||
                       error("`$f` has no method naming `$handle` in $(basename(path))")

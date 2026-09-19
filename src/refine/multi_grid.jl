@@ -36,9 +36,11 @@ index space**, the same convention a single [`TwoGrid`](@ref) takes. One patch
 gives exactly the two-level grid, and the cycle below then does exactly what
 `refine_cycle!` does.
 """
-struct GridChain{T<:AbstractFloat}
-    levels::Vector{TwoGrid{T}}
+struct GridChain{T<:AbstractFloat,L}
+    levels::Vector{L}
 end
+
+GridChain(levels::Vector{TwoGrid{T}}) where {T} = GridChain{T,TwoGrid{T}}(levels)
 
 function GridChain(::Type{T}, base_dims::NTuple{3,<:Integer},
                    patches::AbstractVector, τ_base::Real;
@@ -54,7 +56,7 @@ function GridChain(::Type{T}, base_dims::NTuple{3,<:Integer},
         dims = NTuple{3,Int}(size(rg.fine)[1:3])
         τ = rg.τf
     end
-    return GridChain{T}(levels)
+    return GridChain(levels)
 end
 
 """The arrays, coarsest first: `n` pairs describe `n + 1` levels."""
@@ -85,6 +87,23 @@ function chain_sizes(ch::GridChain)
 end
 
 """
+    level_steps!(array, nsteps, τ; kwargs...)
+    level_wall_steps!(array, wall, nsteps, τ; kwargs...)
+
+Advance one level, with and without a body in it — the only two operations the
+chain's recursion performs that differ between backends. Everything else it
+touches (the interface fill, the restriction, the saved box) already dispatches
+on the level's own type, so defining these two for a backend is what makes the
+whole hierarchy work there.
+"""
+level_steps!(a::Array{T,4}, nsteps::Integer, τ::Real; kwargs...) where {T} =
+    aa_run!(a, nsteps, τ; kwargs...)
+
+level_wall_steps!(a::Array{T,4}, wall::RotatingWall{T}, nsteps::Integer, τ::Real;
+                  kwargs...) where {T} =
+    aa_run_walls!(a, wall.wall, nsteps, τ; reduction = :mean, kwargs...)
+
+"""
     chain_cycle_walls!(ch, wall; force, spin, ...)
 
 One base-level cycle — two steps of the coarsest grid — with the ball on the
@@ -109,7 +128,7 @@ which is checked rather than asserted (`test/test_multi_grid.jl`).
 `channel` reaches the base level only. The domain boundary belongs to the
 coarsest grid; every patch is several diameters inside it (§4.4.2.1).
 """
-function chain_cycle_walls!(ch::GridChain{T}, wall::Union{RotatingWall{T},Nothing};
+function chain_cycle_walls!(ch::GridChain{T}, wall;
                             force::NTuple{3,<:Real} = (0, 0, 0),
                             spin::NTuple{3,<:Real} = (0, 0, 0),
                             operator::Symbol = :central_moment,
@@ -137,15 +156,16 @@ function chain_cycle_walls!(ch::GridChain{T}, wall::Union{RotatingWall{T},Nothin
     function two_steps!(i::Int)
         if i > npairs
             if wall === nothing
-                aa_run!(arrays[i], 2, τs[i]; force = scale(F0, i), operator = operator,
-                        smagorinsky = smagorinsky,
-                        omega_bulk = omega_bulk, omega_higher = omega_higher)
+                level_steps!(arrays[i], 2, τs[i]; force = scale(F0, i),
+                             operator = operator, smagorinsky = smagorinsky,
+                             omega_bulk = omega_bulk, omega_higher = omega_higher)
             else
-                F, M = aa_run_walls!(arrays[i], wall.wall, 2, τs[i];
-                                     force = scale(F0, i), spin = scale(ω0, i),
-                                     operator = operator, rule = rule, reduction = :mean,
-                                     smagorinsky = smagorinsky,
-                                     omega_bulk = omega_bulk, omega_higher = omega_higher)
+                F, M = level_wall_steps!(arrays[i], wall, 2, τs[i];
+                                         force = scale(F0, i), spin = scale(ω0, i),
+                                         operator = operator, rule = rule,
+                                         smagorinsky = smagorinsky,
+                                         omega_bulk = omega_bulk,
+                                         omega_higher = omega_higher)
                 sF[] = sF[] .+ F
                 sM[] = sM[] .+ M
             end
@@ -154,10 +174,10 @@ function chain_cycle_walls!(ch::GridChain{T}, wall::Union{RotatingWall{T},Nothin
         end
         rg = ch.levels[i]
         save_coarse!(rg)
-        aa_run!(arrays[i], 2, τs[i]; force = scale(F0, i), operator = operator,
-                smagorinsky = smagorinsky,
-                channel = i == 1 ? channel : nothing, inlet = inlet,
-                omega_bulk = omega_bulk, omega_higher = omega_higher)
+        level_steps!(arrays[i], 2, τs[i]; force = scale(F0, i), operator = operator,
+                     smagorinsky = smagorinsky,
+                     channel = i == 1 ? channel : nothing, inlet = inlet,
+                     omega_bulk = omega_bulk, omega_higher = omega_higher)
         for half in 1:2
             two_steps!(i + 1)
             interface_fill!(rg, half / 2; layers = layers, scratch = scratch)

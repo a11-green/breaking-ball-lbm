@@ -77,6 +77,7 @@ export LBMState, Lattice, D3Q19, D3Q27,
     GridChain, levels, level_taus, base_grid, finest_grid, chain_sizes,
     chain_cycle_walls!, chain_force, chain_torque, init_chain!, level_origin,
     ChainFlow, init_chain_flow!, refresh_base_solid!, deepest_index,
+    level_steps!, level_wall_steps!, gpu_chain, gpu_chain_flow,
     interface_fill!, restrict!, save_coarse!, refine_cycle!,
     init_refined!, level_macroscopic, node_macroscopic,
     TrajectorySamples, samples, break_references, seam_world, spin_axis_world,
@@ -170,6 +171,16 @@ the CUDA extension.
 """
 function gpu_two_grid end
 function gpu_refined_flow end
+
+"""
+    gpu_chain(ch; layers)
+    gpu_chain_flow(cf; layers)
+
+Move a [`GridChain`](@ref) or a [`ChainFlow`](@ref) to the device, sharing the
+arrays between levels as the host chain does. Defined by the CUDA extension.
+"""
+function gpu_chain end
+function gpu_chain_flow end
 
 """Whether the CUDA extension has been loaded."""
 gpu_backend_loaded() = !isnothing(Base.get_extension(@__MODULE__, :BreakingBallLBMCUDAExt))

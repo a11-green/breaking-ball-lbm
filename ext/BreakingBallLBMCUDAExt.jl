@@ -758,4 +758,198 @@ BreakingBallLBM.max_substeps(drf::DeviceRefinedFlow, spin::NTuple{3,<:Real}, dri
     max(2, 2 * floor(Int, drift /
         (BBL.surface_drift_per_step(drf.wall, spin ./ drf.grid.ratio) * drf.grid.ratio) / 2))
 
+# --- chains of levels ------------------------------------------------------
+#
+# The recursion itself lives in the library and is shared: what a backend has to
+# supply is the two ways to advance a single level, with and without a body in
+# it. Everything else the cycle touches — the saved box, the interface fill, the
+# restriction — already dispatches on `DeviceTwoGrid`.
+
+BreakingBallLBM.level_steps!(a::CuArray{T,4}, nsteps::Integer, τ::Real;
+                             kwargs...) where {T} =
+    BreakingBallLBM.gpu_run!(a, nsteps, τ; kwargs...)
+
+BreakingBallLBM.level_wall_steps!(a::CuArray{T,4}, w::DeviceRotatingFlow{T},
+                                  nsteps::Integer, τ::Real; kwargs...) where {T} =
+    BreakingBallLBM.gpu_run_walls!(a, w.flow.wall, w.flow.contrib, nsteps, τ;
+                                   reduction = :mean, kwargs...)
+
+"""
+    gpu_chain(ch; layers = 3)
+
+Move a [`GridChain`](@ref) to the device, **sharing the arrays the same way the
+host chain does**: each level's fine array is the next pair's coarse one, so a
+step taken on one is already visible to the pair below. Copying instead would
+leave the pairs solving different flows.
+"""
+function BreakingBallLBM.gpu_chain(ch::BBL.GridChain{T}; layers::Integer = 3) where {T}
+    dlevels = Any[]
+    for (n, rg) in enumerate(ch.levels)
+        coarse = isempty(dlevels) ? CuArray(rg.coarse) : dlevels[end].fine
+        fine = CuArray(rg.fine)
+        prev = CuArray(rg.prev)
+        edge = CuArray(BBL.interface_nodes(size(rg.fine)[1:3], layers))
+        push!(dlevels, DeviceTwoGrid{T,typeof(fine),typeof(prev),typeof(edge)}(
+            coarse, fine, prev, rg.τc, rg.τf, rg.lo, rg.hi, rg.ratio, rg.α,
+            edge, Int(layers)))
+    end
+    levels = [d for d in dlevels]          # narrow the element type
+    return BBL.GridChain{T,eltype(levels)}(levels)
+end
+
+"""Device twin of [`ChainFlow`](@ref)."""
+mutable struct DeviceChainFlow{T<:AbstractFloat,C,W,M}
+    chain::C
+    wall::W
+    base_mask::M                 # one where the base-level node counts, as on the pair
+    nfluid::Int
+    cycles::Int
+end
+
+"""
+The affine map from a base index to the deepest level's, per dimension.
+
+Composing `a -> ratio*(a - lo) + 1` over the levels is affine, so it is two
+numbers rather than a loop inside the kernel — evaluated on the host at zero and
+one, which is also the least error-prone way to get it right.
+"""
+function chain_index_map(ch::BBL.GridChain)
+    f(i, d) = begin
+        a = i
+        for rg in ch.levels
+            a = rg.ratio * (a - rg.lo[d]) + 1
+        end
+        a
+    end
+    B = ntuple(d -> f(0, d), 3)
+    A = ntuple(d -> f(1, d) - B[d], 3)
+    return A, B
+end
+
+function chain_mask_kernel!(mask, kind, A::NTuple{3,Int}, B::NTuple{3,Int},
+                            nx::Int, ny::Int, nz::Int, dx::Int, dy::Int, dz::Int,
+                            ::Type{T}) where {T}
+    n = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
+    if n <= nx * ny * nz
+        t = Int(n) - 1
+        i = t % nx + 1
+        j = (t ÷ nx) % ny + 1
+        k = t ÷ (nx * ny) + 1
+        a = A[1] * i + B[1]
+        b = A[2] * j + B[2]
+        c = A[3] * k + B[3]
+        inside = 1 <= a <= dx && 1 <= b <= dy && 1 <= c <= dz
+        solid = inside && (@inbounds kind[a, b, c] == BBL.SOLID_NODE)
+        @inbounds mask[i, j, k] = solid ? zero(T) : one(T)
+    end
+    return nothing
+end
+
+function BreakingBallLBM.refresh_base_solid!(dcf::DeviceChainFlow{T};
+                                             threads::Int = 128) where {T}
+    ch = dcf.chain
+    base = BBL.base_grid(ch)
+    deep = BBL.finest_grid(ch)
+    nx, ny, nz = size(base)[1:3]
+    dx, dy, dz = size(deep)[1:3]
+    A, B = chain_index_map(ch)
+    n = nx * ny * nz
+    @cuda threads = threads blocks = cld(n, threads) chain_mask_kernel!(
+        dcf.base_mask, dcf.wall.flow.wall.kind, A, B, nx, ny, nz, dx, dy, dz, T)
+    dcf.nfluid = Int(sum(dcf.base_mask))
+    return dcf
+end
+
+"""Move a [`ChainFlow`](@ref) to the device, chain and all."""
+function BreakingBallLBM.gpu_chain_flow(cf::BBL.ChainFlow{T};
+                                        layers::Integer = 3) where {T}
+    dch = BreakingBallLBM.gpu_chain(cf.chain; layers = layers)
+    dw = BreakingBallLBM.gpu_rotating_flow(cf.wall)
+    mask = CuArray(T.(.!cf.base_solid))
+    return DeviceChainFlow{T,typeof(dch),typeof(dw),typeof(mask)}(
+        dch, dw, mask, cf.nfluid, cf.cycles)
+end
+
+BreakingBallLBM.flow_fluid_count(dcf::DeviceChainFlow) = dcf.nfluid
+BreakingBallLBM.flow_wall(dcf::DeviceChainFlow) = BreakingBallLBM.flow_wall(dcf.wall)
+BreakingBallLBM.flow_recuts(dcf::DeviceChainFlow) = BreakingBallLBM.flow_recuts(dcf.wall)
+BreakingBallLBM.flow_coarse_solid(dcf::DeviceChainFlow) = dcf.base_mask .== 0
+
+"""Mass-averaged density and velocity over the base level, skipping the ball."""
+function BreakingBallLBM.flow_mean_velocity(ch::BBL.GridChain{T},
+                                            dcf::DeviceChainFlow{T},
+                                            force::NTuple{3,<:Real}) where {T}
+    base = BBL.base_grid(ch)
+    n = size(base, 1) * size(base, 2) * size(base, 3)
+    gr = reshape(base, n, 27)
+    mask = reshape(dcf.base_mask, n)
+
+    ρ = 0.0; mx = 0.0; my = 0.0; mz = 0.0
+    for s in 1:27
+        cx, cy, cz = BBL.cube_velocity(s)
+        total = mapreduce((a, b) -> Float64(a) * Float64(b), +,
+                          view(gr, :, s), mask; init = 0.0)
+        ρ += total
+        cx != 0 && (mx += cx * total)
+        cy != 0 && (my += cy * total)
+        cz != 0 && (mz += cz * total)
+    end
+    ρ == 0 && return zero(T), (zero(T), zero(T), zero(T))
+    half = 0.5 * dcf.nfluid
+    return T(ρ / dcf.nfluid), (T((mx + half * Float64(force[1])) / ρ),
+                               T((my + half * Float64(force[2])) / ρ),
+                               T((mz + half * Float64(force[3])) / ρ))
+end
+
+function BreakingBallLBM.advance_flow!(ch::BBL.GridChain{T}, dcf::DeviceChainFlow{T},
+                                       nsteps::Integer, τ::Real;
+                                       force::NTuple{3,<:Real} = (0, 0, 0),
+                                       spin::NTuple{3,<:Real} = (0, 0, 0),
+                                       operator::Symbol = :central_moment,
+                                       rule::Symbol = :interpolated_local,
+                                       smagorinsky::Real = 0.0,
+                                       omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
+                                       channel = nothing,
+                                       inlet::NTuple{3,<:Real} = (0, 0, 0),
+                                       layers::Integer = 3,
+                                       filtered::Bool = false) where {T}
+    iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
+    npairs = length(ch.levels)
+    m = ch.levels[1].ratio
+    sF = (zero(T), zero(T), zero(T))
+    sM = (zero(T), zero(T), zero(T))
+    cycles = nsteps ÷ 2
+    for _ in 1:cycles
+        F, M = BreakingBallLBM.chain_cycle_walls!(ch, dcf.wall; force = force,
+                                                  spin = spin, operator = operator,
+                                                  rule = rule,
+                                                  smagorinsky = smagorinsky,
+                                                  channel = channel, inlet = inlet,
+                                                  omega_bulk = omega_bulk,
+                                                  omega_higher = omega_higher)
+        sF = sF .+ F
+        sM = sM .+ M
+        dcf.cycles += 1
+    end
+    w = one(T) / cycles
+    return BBL.chain_force(sF .* w, m, npairs), BBL.chain_torque(sM .* w, m, npairs)
+end
+
+function BreakingBallLBM.maybe_recut!(ch::BBL.GridChain{T}, dcf::DeviceChainFlow{T},
+                                      q::BBL.Quat{T}, spin::NTuple{3,<:Real},
+                                      drift::Real) where {T}
+    npairs = length(ch.levels)
+    ωd = T.(spin) ./ T(ch.levels[1].ratio)^npairs
+    fresh = BreakingBallLBM.maybe_recut!(BBL.finest_grid(ch), dcf.wall, q, ωd, drift)
+    fresh == 0 && return 0
+    BreakingBallLBM.refresh_base_solid!(dcf)
+    return fresh
+end
+
+BreakingBallLBM.max_substeps(dcf::DeviceChainFlow, spin::NTuple{3,<:Real}, drift::Real) =
+    let ch = dcf.chain, npairs = length(ch.levels), m = ch.levels[1].ratio,
+        per = BBL.surface_drift_per_step(dcf.wall, spin ./ m^npairs)
+        per == 0 ? typemax(Int) : max(2, 2 * floor(Int, drift / (per * m^npairs) / 2))
+    end
+
 end # module
