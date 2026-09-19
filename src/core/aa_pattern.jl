@@ -148,7 +148,7 @@ Write the post-collision populations of node `(i, j, k)` back out.
 end
 
 """
-    collide_buffer!(buf, τ, force, Val(operator), ωb, ωh)
+    collide_buffer!(buf, τ, force, Val(operator), ωb, ωh, smag = 0, ωo = ωh)
 
 Collide the 27 populations of one node, in place, in cube-slot order. The
 operator arrives as a `Val` so that it is a compile-time constant: a `Symbol` is
@@ -158,7 +158,8 @@ GPU kernel call — so the device runs code the analytic benchmarks have already
 checked on the host.
 """
 @inline function collide_buffer!(buf, τ::T, force::NTuple{3,T}, ::Val{OP},
-                                 ωb::T, ωh::T, smag::T = zero(T)) where {T,OP}
+                                 ωb::T, ωh::T, smag::T = zero(T),
+                                 ωo::T = ωh) where {T,OP}
     ρ = zero(T)
     mx = zero(T)
     my = zero(T)
@@ -210,7 +211,7 @@ checked on the host.
 
     if OP === :central_moment
         to_moments!(buf, ux, uy, uz)
-        relax_moments!(buf, ρ, ω, force, ωb, ωh)
+        relax_moments!(buf, ρ, ω, force, ωb, ωh, ωo)
         to_populations!(buf, ux, uy, uz)
     else
         pre = one(T) - ω / 2
@@ -238,22 +239,23 @@ checked on the host.
 end
 
 """
-    aa_step_node!(g, buf, even, i, j, k, nx, ny, nz, τ, force, operator, ωb, ωh)
+    aa_step_node!(g, buf, even, i, j, k, nx, ny, nz, τ, force, operator, ωb, ωh,
+                  smag = 0, ωo = ωh)
 
 One AA-pattern time step for a single node: gather, collide, scatter.
 """
 @inline function aa_step_node!(g, buf, even::Bool, i::Int, j::Int, k::Int,
                                nx::Int, ny::Int, nz::Int, τ::T, force::NTuple{3,T},
                                operator::Val, ωb::T, ωh::T,
-                               smag::T = zero(T)) where {T}
+                               smag::T = zero(T), ωo::T = ωh) where {T}
     aa_gather!(buf, g, even, i, j, k, nx, ny, nz)
-    collide_buffer!(buf, τ, force, operator, ωb, ωh, smag)
+    collide_buffer!(buf, τ, force, operator, ωb, ωh, smag, ωo)
     aa_scatter!(g, buf, even, i, j, k, nx, ny, nz)
     return nothing
 end
 
 """
-    aa_run!(g, nsteps, τ; force, operator, omega_bulk, omega_higher)
+    aa_run!(g, nsteps, τ; force, operator, omega_bulk, omega_higher, omega_odd)
 
 Reference CPU driver for the AA-pattern, mainly so the device path can be
 checked against the two-lattice implementation. `nsteps` must be even, which
@@ -263,6 +265,7 @@ function aa_run!(g::Array{T,4}, nsteps::Integer, τ::Real;
                  force::NTuple{3,<:Real} = (0, 0, 0), operator::Symbol = :central_moment,
                  smagorinsky::Real = 0.0,
                  omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
+                 omega_odd::Real = omega_higher,
                  channel = nothing, inlet::NTuple{3,<:Real} = (0, 0, 0)) where {T}
     iseven(nsteps) || throw(ArgumentError("nsteps must be even, got $nsteps"))
     nx, ny, nz = size(g, 1), size(g, 2), size(g, 3)
@@ -273,7 +276,8 @@ function aa_run!(g::Array{T,4}, nsteps::Integer, τ::Real;
         even = isodd(n)          # the first step of each pair is the "even" pattern
         for k in 1:nz, j in 1:ny, i in 1:nx
             aa_step_node!(g, buf, even, i, j, k, nx, ny, nz, T(τ), F,
-                          op, T(omega_bulk), T(omega_higher), T(smagorinsky))
+                          op, T(omega_bulk), T(omega_higher), T(smagorinsky),
+                          T(omega_odd))
         end
         # See `OpenChannel`: the even layout is the only one where a node's
         # populations are its own, so the faces are imposed once per pair.

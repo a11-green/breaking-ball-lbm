@@ -123,16 +123,19 @@ end
 
 """
     step!(s, links, vals; force = nothing, solid = nothing, les = nothing,
-          operator = :bgk, rule = :interpolated, spin = (0, 0, 0))
+          operator = :bgk, rule = :interpolated, spin = (0, 0, 0), kwargs...)
 
 One time step with a wall: collide, bounce back, stream, apply. Returns the
-`(force, torque)` transferred to the wall during this step.
+`(force, torque)` transferred to the wall during this step. Anything else is
+handed to [`collide!`](@ref), which is how the operator's own knobs
+(`omega_bulk`, `omega_higher`, `omega_odd`) reach it.
 """
 function step!(s::LBMState{T}, links::BounceBackLinks{T}, vals::Vector{T};
                force = nothing, solid = nothing, les = nothing,
                operator::Symbol = :bgk,
-               rule::Symbol = :interpolated, spin::NTuple{3,<:Real} = (0, 0, 0)) where {T}
-    collide!(s; force = force, solid = solid, les = les, operator = operator)
+               rule::Symbol = :interpolated, spin::NTuple{3,<:Real} = (0, 0, 0),
+               kwargs...) where {T}
+    collide!(s; force = force, solid = solid, les = les, operator = operator, kwargs...)
     F, τq = bounce_back_values!(vals, s, links; rule = rule, spin = spin)
     stream!(s)
     apply_bounce_back!(s, links, vals)

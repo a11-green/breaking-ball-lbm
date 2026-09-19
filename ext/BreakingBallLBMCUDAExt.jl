@@ -16,7 +16,8 @@ using StaticArrays
 const BBL = BreakingBallLBM
 
 function aa_kernel!(g, even::Bool, nx::Int, ny::Int, nz::Int, τ::T,
-                    force::NTuple{3,T}, op::Val, ωb::T, ωh::T, smag::T) where {T}
+                    force::NTuple{3,T}, op::Val, ωb::T, ωh::T, smag::T,
+                    ωo::T) where {T}
     idx = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
         t = Int(idx) - 1
@@ -24,7 +25,8 @@ function aa_kernel!(g, even::Bool, nx::Int, ny::Int, nz::Int, τ::T,
         j = (t ÷ nx) % ny + 1
         k = t ÷ (nx * ny) + 1
         buf = MVector{27,T}(undef)
-        BBL.aa_step_node!(g, buf, even, i, j, k, nx, ny, nz, τ, force, op, ωb, ωh, smag)
+        BBL.aa_step_node!(g, buf, even, i, j, k, nx, ny, nz, τ, force, op, ωb, ωh,
+                          smag, ωo)
     end
     return nothing
 end
@@ -34,6 +36,7 @@ function BreakingBallLBM.gpu_run!(g::CuArray{T,4}, nsteps::Integer, τ::Real;
                                   operator::Symbol = :central_moment,
                                   smagorinsky::Real = 0.0,
                                   omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
+                                  omega_odd::Real = omega_higher,
                                   channel = nothing,
                                   inlet::NTuple{3,<:Real} = (0, 0, 0),
                                   threads::Int = 128) where {T}
@@ -46,12 +49,13 @@ function BreakingBallLBM.gpu_run!(g::CuArray{T,4}, nsteps::Integer, τ::Real;
     F = T.(force)
     op = Val(operator)
     τT, ωbT, ωhT = T(τ), T(omega_bulk), T(omega_higher)
+    ωoT = T(omega_odd)
     smagT = T(smagorinsky)
 
     for step in 1:nsteps
         even = isodd(step)
         @cuda threads = threads blocks = blocks aa_kernel!(g, even, nx, ny, nz, τT,
-                                                           F, op, ωbT, ωhT, smagT)
+                                                           F, op, ωbT, ωhT, smagT, ωoT)
         if channel !== nothing && iseven(step)
             BreakingBallLBM.apply_open!(g, channel, inlet)
         end
@@ -186,7 +190,7 @@ race-free for the same reason overwriting is: one thread owns the column.
 function aa_wall_kernel!(g, contrib, even::Bool, nx::Int, ny::Int, nz::Int, τ::T,
                          force::NTuple{3,T}, op::Val, ωb::T, ωh::T,
                          kind, deltas, center::NTuple{3,T}, spin::NTuple{3,T},
-                         halfway::Bool, smag::T, ::Val{ACC}) where {T,ACC}
+                         halfway::Bool, smag::T, ωo::T, ::Val{ACC}) where {T,ACC}
     idx = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
     if idx <= nx * ny * nz
         t = Int(idx) - 1
@@ -196,7 +200,7 @@ function aa_wall_kernel!(g, contrib, even::Bool, nx::Int, ny::Int, nz::Int, τ::
         buf = MVector{27,T}(undef)
         F, M = BBL.aa_step_node_walls!(g, buf, even, i, j, k, nx, ny, nz, τ, force,
                                        op, ωb, ωh, kind, deltas, center, spin, halfway,
-                                       smag)
+                                       smag, ωo)
         @inbounds b = kind[i, j, k]
         if b > Int32(0)
             if ACC
@@ -233,6 +237,7 @@ function BreakingBallLBM.gpu_run_walls!(g::CuArray{T,4}, wall::BBL.WallField,
                                         reduction::Symbol = :last,
                                         smagorinsky::Real = 0.0,
                                         omega_bulk::Real = 1.0, omega_higher::Real = 1.0,
+                                        omega_odd::Real = omega_higher,
                                         channel = nothing,
                                         inlet::NTuple{3,<:Real} = (0, 0, 0),
                                         threads::Int = 128) where {T}
@@ -252,6 +257,7 @@ function BreakingBallLBM.gpu_run_walls!(g::CuArray{T,4}, wall::BBL.WallField,
     op = Val(operator)
     halfway = rule === :halfway
     τT, ωbT, ωhT = T(τ), T(omega_bulk), T(omega_higher)
+    ωoT = T(omega_odd)
     center = T.(wall.center)
     acc = Val(reduction === :mean)
     reduction === :mean && fill!(contrib, zero(T))
@@ -260,7 +266,7 @@ function BreakingBallLBM.gpu_run_walls!(g::CuArray{T,4}, wall::BBL.WallField,
         even = isodd(step)
         @cuda threads = threads blocks = blocks aa_wall_kernel!(
             g, contrib, even, nx, ny, nz, τT, F, op, ωbT, ωhT,
-            wall.kind, wall.deltas, center, ω, halfway, T(smagorinsky), acc)
+            wall.kind, wall.deltas, center, ω, halfway, T(smagorinsky), ωoT, acc)
         if channel !== nothing && iseven(step)
             BreakingBallLBM.apply_open!(g, channel, inlet)
         end

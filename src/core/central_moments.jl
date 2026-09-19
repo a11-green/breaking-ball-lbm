@@ -131,15 +131,47 @@ end
 end
 
 """
-    relax_moments!(buf, ρ, ω, force, ωb = 1, ωh = 1)
+    relax_moments!(buf, ρ, ω, force, ωb = 1, ωh = 1, ωo = ωh)
 
 Relax central moments in place: mass is untouched, momentum takes the body
 force, the deviatoric second-order moments relax at `ω` and their trace at `ωb`,
-and everything of third order and above has its cumulant relaxed to zero at
-rate `ωh`.
+and everything of third order and above has its cumulant relaxed to zero — the
+even orders at `ωh`, the odd ones at `ωo`.
+
+**Why the odd orders get their own rate.** Bounce-back does not put the wall
+where the geometry says it is. TRT says it puts it where the magic parameter
+`Λ = (1/ω⁺ - 1/2)(1/ω⁻ - 1/2)` says, and that only `Λ = 3/16` puts it halfway.
+`ω⁺` is the rate the even non-equilibrium moments relax at, which is the one
+carrying the shear viscosity, so `1/ω⁺ - 1/2 = τ - 1/2` and it is not free. `ω⁻`
+is the rate the odd ones relax at, and here those are the third- and fifth-order
+cumulants — this argument, not `ω`. Under BGK the two rates are the same and `Λ`
+collapses as `(τ - 1/2)²`; separating them makes it reachable.
+
+**And the answer it gives is to leave `ωo` alone.** `test/test_boundary.jl` fits
+the wall position out of a Poiseuille profile under this operator. At `ωo = 1`
+the wall lands within 0.005 of where the geometry puts it at τ = 0.53, and the
+error *shrinks* as τ → 1/2; forcing `Λ = 3/16` moves it further out at every τ
+tried — four times as far at τ = 0.56, ten times at 0.53 — under both
+bounce-back rules and with the wall on or off the midpoint. So 1.0 is at or near this operator's optimum, the wall condition gets
+better at the production τ rather than worse, and the 7% the sphere validation's
+τ ladder moves at Re = 100 is something else. That is what this argument exists
+to have established; it is not a knob production is expected to turn.
+
+The even orders keep `ωh` regardless, because that is what the stability rests
+on: they are rebuilt from the *current* second-order moments through Isserlis'
+theorem, and under-relaxing them leaves the fourth- and sixth-order content
+lagging behind the strain rate it is supposed to follow. Driving both rates down
+together diverges at Re = 100 inside two hundred steps, which is why the rate
+had to be split before the question could be asked at all.
+
+Odd cumulants relax towards zero, which is also their Gaussian target, so the
+odd branch is plain under-relaxation and the two branches agree when
+`ωo == ωh`. Both default to 1, which is the operator as it was before the rate
+was split.
 """
 @inline function relax_moments!(buf::AbstractVector{T}, ρ::T, ω::T, force::NTuple{3,T},
-                                ωb::T = one(T), ωh::T = one(T)) where {T}
+                                ωb::T = one(T), ωh::T = one(T),
+                                ωo::T = ωh) where {T}
     κeq2 = ρ * T(CS2)
     invρ = one(T) / ρ
     third = one(T) / 3
@@ -168,25 +200,34 @@ rate `ωh`.
         D, E, F = buf[5] * invρ, buf[11] * invρ, buf[13] * invρ
 
         for o in 0:2, n in 0:2, m in 0:2
-            m + n + o >= 3 || continue
+            ord = m + n + o
+            ord >= 3 || continue
             idx = 1 + m + 3n + 9o
-            target = ρ * gaussian_moment(m, n, o, A, B, C, D, E, F)
-            buf[idx] += ωh * (target - buf[idx])
+            if isodd(ord)
+                buf[idx] *= (one(T) - ωo)
+            else
+                target = ρ * gaussian_moment(m, n, o, A, B, C, D, E, F)
+                buf[idx] += ωh * (target - buf[idx])
+            end
         end
     end
 end
 
 """
     collide_central_moments!(s; force = nothing, solid = nothing, les = nothing,
-                             omega_bulk = 1.0, omega_higher = 1.0)
+                             omega_bulk = 1.0, omega_higher = 1.0,
+                             omega_odd = omega_higher)
 
 Central-moment collision over the whole domain. Requires a D3Q27 state.
-`omega_bulk` relaxes the acoustic mode and `omega_higher` the cumulants above
-second order; both default to full damping, which is what the stability rests on.
+`omega_bulk` relaxes the acoustic mode, `omega_higher` the even cumulants above
+second order and `omega_odd` the odd ones; all default to full damping, which is
+what the stability rests on. `omega_odd` is the wall's `ω⁻` — see
+[`relax_moments!`](@ref) for what lowering it buys and costs.
 """
 function collide_central_moments!(s::LBMState{T}; force = nothing, solid = nothing,
                                   les = nothing, omega_bulk = 1.0,
-                                  omega_higher = 1.0) where {T}
+                                  omega_higher = 1.0,
+                                  omega_odd = omega_higher) where {T}
     s.lattice isa D3Q27 ||
         throw(ArgumentError("the central-moment operator needs D3Q27, got $(s.lattice)"))
     f = s.f
@@ -222,7 +263,7 @@ function collide_central_moments!(s::LBMState{T}; force = nothing, solid = nothi
         end
 
         to_moments!(buf, ux, uy, uz)
-        relax_moments!(buf, ρ, ωnode, F, T(omega_bulk), T(omega_higher))
+        relax_moments!(buf, ρ, ωnode, F, T(omega_bulk), T(omega_higher), T(omega_odd))
         to_populations!(buf, ux, uy, uz)
 
         for q in 1:27

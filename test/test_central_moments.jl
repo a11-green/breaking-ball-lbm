@@ -167,4 +167,39 @@
         @test !survives(:bgk, D3Q19())
         @test survives(:central_moment, D3Q27())
     end
+
+    @testset "odd and even higher moments have separate rates" begin
+        # `omega_odd` is the wall's ω⁻ (see `relax_moments!`). It must reach the
+        # odd cumulants and nothing else, and it must default to the operator as
+        # it was before the rate was split.
+        relax = BreakingBallLBM.relax_moments!
+        pre = collect(range(0.7, 1.3; length = 27))
+        zero3 = (0.0, 0.0, 0.0)
+
+        # Order 3 lives at (2,1,0) → 6 and (1,1,1) → 14; order 4 at (2,2,0) → 9
+        # and order 6 at (2,2,2) → 27. Index is 1 + m + 3n + 9o.
+        a = copy(pre); relax(a, 1.0, 1 / 0.6, zero3, 1.0, 1.0, 1.0)
+        b = copy(pre); relax(b, 1.0, 1 / 0.6, zero3, 1.0, 1.0, 0.25)
+        @test b[6] ≈ 0.75 * pre[6]
+        @test b[14] ≈ 0.75 * pre[14]
+        @test a[6] ≈ 0.0 atol = 1e-15
+        @test b[9] == a[9]                     # even orders untouched by ωo
+        @test b[27] == a[27]
+
+        # Defaulting ωo to ωh reproduces the single-rate operator exactly, so
+        # nothing that does not ask for the split can see it.
+        c = copy(pre); relax(c, 1.0, 1 / 0.6, zero3, 1.0, 0.4)
+        d = copy(pre); relax(d, 1.0, 1 / 0.6, zero3, 1.0, 0.4, 0.4)
+        @test c == d
+
+        for T in (Float64, Float32)
+            g = T.(reshape(range(0.8, 1.2; length = 8 * 8 * 8 * 27), 8, 8, 8, 27))
+            x = copy(g); y = copy(g); z = copy(g)
+            aa_run!(x, 4, T(0.55); force = (T(1e-4), T(0), T(0)))
+            aa_run!(y, 4, T(0.55); force = (T(1e-4), T(0), T(0)), omega_odd = 1.0)
+            aa_run!(z, 4, T(0.55); force = (T(1e-4), T(0), T(0)), omega_odd = 0.3)
+            @test x == y
+            @test z != y
+        end
+    end
 end

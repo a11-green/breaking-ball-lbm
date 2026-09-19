@@ -113,7 +113,7 @@ export LBMState, Lattice, D3Q19, D3Q27,
     PitchRun, PitchState, couple_step!, couple_residual, spin_up!, fly!
 
 """
-    gpu_run!(g, nsteps, τ; force, operator, omega_bulk, omega_higher)
+    gpu_run!(g, nsteps, τ; force, operator, omega_bulk, omega_higher, omega_odd)
 
 Advance an AA-pattern state held on the device. Defined by the CUDA extension,
 so it needs `using CUDA, StaticArrays` before it resolves.

@@ -198,6 +198,52 @@
         @test abs(lo_h - ch.y_lo) > 4 * abs(lo - ch.y_lo)   # interpolation really helps
     end
 
+    @testset "where the central-moment operator puts the wall" begin
+        # TRT says bounce-back places the wall at `Λ = (1/ω⁺ - 1/2)(1/ω⁻ - 1/2)`
+        # and that only `Λ = 3/16` places it halfway. Under this operator `ω⁻`
+        # is `omega_odd`, so the rule is reachable — and the reason it is worth
+        # a test is that following it makes the wall position *worse*. The
+        # sphere validation's τ ladder moves 7% at Re = 100 and the obvious
+        # suspect was this; it is not, and this is what rules it out.
+        lambda_omega(τ, Λ = 3 / 16) = 1 / (0.5 + Λ / (τ - 0.5))
+
+        function fitted_wall(τ, ωo; steps = 8000)
+            ν = viscosity_from_tau(τ)
+            ch = PoiseuilleChannel(y_lo = 3.3, y_hi = 20.7, force = 2.0e-6, ν = ν)
+            dims = (4, 24, 4)
+            ϕ = channel_sdf(ch, dims)
+            solid = solid_mask(ϕ)
+            links = build_links(ϕ)
+            g = (ch.force, 0.0, 0.0)
+            s = LBMState(dims..., τ; lattice = D3Q27())
+            init_equilibrium!(s, (i, j, k) -> (1.0, 0.0, 0.0, 0.0))
+            init_solid!(s, solid)
+            vals = zeros(Float64, length(links))
+            for _ in 1:steps
+                step!(s, links, vals; force = g, solid = solid, rule = :interpolated,
+                      operator = :central_moment, omega_odd = ωo)
+            end
+            profile = [fluid_velocity(s, 2, j, 2, g)[2] for j in 1:dims[2]]
+            rows = [j for j in 1:dims[2] if !solid[2, j, 2]]
+            A = [ones(length(rows)) Float64.(rows) Float64.(rows) .^ 2]
+            c = A \ [profile[j] for j in rows]
+            disc = sqrt(c[2]^2 - 4 * c[3] * c[1])
+            return (-c[2] + disc) / (2c[3])          # the low wall
+        end
+
+        y_lo = 3.3
+        free = [abs(fitted_wall(τ, 1.0) - y_lo) for τ in (0.53, 0.56, 0.62)]
+        held = abs(fitted_wall(0.56, lambda_omega(0.56)) - y_lo)
+
+        # At ωo = 1 the wall is where the geometry says, to a twentieth of a cell.
+        @test all(free .< 0.07)
+        # And it gets *better* as τ falls towards the production end, which is
+        # the opposite of what a Λ that collapses with τ would do.
+        @test free[1] < free[3] / 3
+        # Forcing Λ = 3/16 is several times worse at the same τ.
+        @test held > 3 * free[2]
+    end
+
     @testset "torque on a rotating sphere" begin
         # Creeping flow around a sphere spinning at ω has torque 8πμR³ω.
         dims = (28, 28, 28)

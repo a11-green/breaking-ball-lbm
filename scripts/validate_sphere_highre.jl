@@ -91,6 +91,46 @@ turbulence of whoever measured it.
 clift_gauvin(Re) = 24 / Re * (1 + 0.15 * Re^0.687) + 0.42 / (1 + 42500 * Re^-1.16)
 
 """
+    magic_parameter(τ, ωo)
+
+The TRT "magic" parameter for this collision operator, and the reason it is not
+the answer here.
+
+Bounce-back does not put the wall where the geometry says it is; TRT theory says
+it puts it where `Λ = (1/ω⁺ - 1/2)(1/ω⁻ - 1/2)` says, and that `Λ = 3/16` puts
+it halfway. `ω⁺` is the rate the even non-equilibrium moments relax at, the one
+carrying the shear viscosity, so `1/ω⁺ - 1/2 = τ - 1/2` and it is not free. `ω⁻`
+is the rate the odd ones relax at, and in the central-moment operator those are
+the third- and fifth-order cumulants — `omega_odd`, not `ω`. Under BGK the two
+rates are the same and `Λ = (τ - 1/2)²`, which is what this script printed until
+the wall check was read; here they are separate and `Λ` is linear in `τ - 1/2`.
+
+**And the 3/16 rule does not transfer.** `test/test_boundary.jl` fits the wall
+position out of a Poiseuille profile under this operator, both rules, walls on
+and off the midpoint. At `ωo = 1` the wall lands within 0.005 of where the
+geometry puts it at τ = 0.53, and the error *shrinks* as τ → 1/2. Forcing
+`Λ = 3/16` with `omega_for_lambda` moves it two to ten times further out — at
+every τ tried, and by the most where the wall was most nearly right. So `ωo = 1` is at or near this operator's optimum, the wall gets
+*better* at the production τ rather than worse, and the τ ladder below — which
+moves 7% the other way — is not the wall.
+
+That is the second τ hypothesis this project has had to withdraw against its own
+measurement. The number is kept in the tables because it is what the theory
+names, and because a reader who knows TRT will otherwise ask.
+"""
+magic_parameter(τ, ωo) = (τ - oftype(τ, 0.5)) * (one(τ) / oftype(τ, ωo) - oftype(τ, 0.5))
+
+"""
+    omega_for_lambda(τ, Λ = 3/16)
+
+The `omega_odd` that TRT says puts the wall halfway. Inverts
+[`magic_parameter`](@ref): `1/ωo = 1/2 + Λ/(τ - 1/2)`. Measured to make this
+operator's wall position *worse*, not better — see there. Kept as the handle
+that establishes it.
+"""
+omega_for_lambda(τ, Λ = 3 / 16) = 1 / (0.5 + Λ / (τ - 0.5))
+
+"""
     drag_case(T; Re, resolution, domain, smagorinsky, ...)
 
 Hold a uniform stream past a fixed smooth sphere and time-average the drag.
@@ -130,6 +170,7 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
                    tau::Union{Real,Nothing} = nothing, window::Real = 4,
                    max_settling::Real = 80, tolerance::Real = 0.01,
                    chunk::Integer = 20, device::Bool = HAS_CUDA,
+                   omega_odd::Real = 1.0,
                    channel::Bool = false, upstream::Real = 3, downstream::Real = 8) where {T}
     N = Int(resolution)
     edge = round(Int, N * domain)
@@ -159,6 +200,7 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
     end
     τ > 0.5 || error("tau came out at $τ — the Reynolds number is out of reach here")
     ma = u / sqrt(T(CS2))
+    ωo = T(omega_odd)
     ma < 0.3 || error("the lattice Mach number would be $(round(ma, digits=3)) — " *
                       "lower tau or raise the resolution")
 
@@ -262,13 +304,13 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
             F, _ = device ?
                 gpu_run_walls!(g, flow.wall, flow.contrib, chunk, τ; force = control,
                                operator = operator, rule = rule, reduction = :mean,
-                               smagorinsky = smagorinsky, channel = chan,
-                               inlet = target) :
+                               smagorinsky = smagorinsky, omega_odd = ωo,
+                               channel = chan, inlet = target) :
                 aa_run_walls!(g, wall, chunk, τ; force = control, operator = operator,
                               rule = rule, reduction = :mean, smagorinsky = smagorinsky,
-                              channel = chan, inlet = target)
+                              omega_odd = ωo, channel = chan, inlet = target)
             all(isfinite, F) || return (CD = T(NaN), CL = T(NaN), τ = τ,
-                                        Λ = (τ - T(0.5))^2, Ma = ma, u = u,
+                                        Λ = magic_parameter(τ, ωo), Ma = ma, u = u,
                                         Re = T(NaN),
                                         CD_app = T(NaN), Re_app = T(NaN),
                                         approach = T(NaN), U_app = T(NaN),
@@ -318,7 +360,7 @@ function drag_case(::Type{T}; Re::Real, resolution::Integer, domain::Real,
     qa = T(0.5) * Ūa^2 * T(π) * R^2
     CDa = ndisc == 0 || Ūa == 0 ? T(NaN) : -last_force[1] / qa
     Uref = channel ? u : Ū
-    return (CD = CD, CL = CL, τ = τ, Λ = (τ - T(0.5))^2, Ma = ma, u = u,
+    return (CD = CD, CL = CL, τ = τ, Λ = magic_parameter(τ, ωo), Ma = ma, u = u,
             Re = Uref * 2R / ν, deficit = 1 - Ū / u,
             CD_app = CDa, Re_app = Ūa * 2R / ν, approach = Ūa / Uref, U_app = Ūa,
             drift = drift, force = last_force, U = Ū, ν = ν, R = R, edge = edge,
@@ -595,7 +637,8 @@ fractional radius error that shrinks as the radius grows in cells.
 """
 function wall_check(; device = HAS_CUDA, Re = 100, max_settling = 60.0,
                     resolution = 20, upstream = 3, downstream = 5,
-                    widths = (4.0, 6.0, 8.0), taus = (0.505, 0.52, 0.56))
+                    widths = (4.0, 6.0, 8.0), taus = (0.505, 0.52, 0.56),
+                    resolutions = (13, 20))
     open_case(; kwargs...) = drag_case(Float32; Re = Re, device = device,
                                        max_settling = max_settling, channel = true,
                                        upstream = upstream, downstream = downstream,
@@ -675,6 +718,46 @@ function wall_check(; device = HAS_CUDA, Re = 100, max_settling = 60.0,
         flush(stdout)
     end
     println()
+    # What is left after the wall has been ruled out. Truncation and the
+    # operator's own dissipation are fixed in lattice units, so at fixed Re and
+    # N they are a larger fraction of nu the smaller nu gets — which is a tau
+    # dependence that resolution removes and the wall condition does not. If the
+    # spread between the two tau rows shrinks as N grows, that is it.
+    #
+    # The cheap direction is coarsening, and it asks the same question. At fixed
+    # Re and N the lattice velocity is proportional to nu, so the small-tau case
+    # advances the least physics per step and costs by far the most: tau = 0.505
+    # at N/D = 20 is already six minutes, and at 30 it is closer to forty-five.
+    # Going the other way costs a minute and tests the same monotonicity, so the
+    # quick path coarsens and a full run can be given the finer pair instead.
+    @printf("Relaxation time against resolution (Re = %g, width %.1f D)\n",
+            Re, first(widths))
+    @printf("%-6s %-8s %-7s %-10s %-8s %-9s %-7s %-9s %-8s %-6s\n",
+            "N/D", "tau", "Ma", "Lambda", "C_D", "reference", "ratio", "u_in/ref",
+            "drift", "s")
+    spread = Dict{Int,Vector{Float64}}()
+    for N in resolutions, τ in (first(taus), last(taus))
+        try
+            r = open_case(resolution = N, domain = first(widths), tau = τ)
+            r.diverged && (@printf("%-6d %-8.3f diverged\n", N, τ); continue)
+            ratio = r.CD / clift_gauvin(r.Re)
+            push!(get!(spread, N, Float64[]), ratio)
+            @printf("%-6d %-8.3f %-7.3f %-10.2e %-8.3f %-9.3f %-7.2f %-9.3f %+7.2f%% %-6.0f\n",
+                    N, r.τ, r.Ma, r.Λ, r.CD, clift_gauvin(r.Re), ratio, r.approach,
+                    100 * r.drift, r.seconds)
+        catch err
+            @printf("%-6d %-8.3f skipped (%s)\n", N, τ,
+                    first(split(sprint(showerror, err), '\n')))
+        end
+        flush(stdout)
+    end
+    for N in sort(collect(keys(spread)))
+        length(spread[N]) == 2 || continue
+        @printf("N/D = %d: the tau ladder spans %.1f%% of the reference\n",
+                N, 100 * abs(spread[N][1] - spread[N][2]))
+    end
+
+    println()
     println("If the width ladder extrapolates near one, the sphere is right and everything")
     println("left was the box — at this Reynolds number, where the reference is good to a")
     println("few percent and the boundary layer is a fifth of a diameter rather than a")
@@ -689,6 +772,15 @@ function wall_check(; device = HAS_CUDA, Re = 100, max_settling = 60.0,
     println()
     println("Read the rule table before the tau one: it asks the same question without the")
     println("Mach number changing underneath it, and a gap there is the cleaner evidence.")
+    println()
+    println("The Lambda column is printed because TRT names it, not because it explains")
+    println("anything here: the Poiseuille wall fit in test/test_boundary.jl puts this")
+    println("operator's wall within 0.005 of the geometry at omega_odd = 1 and moves it")
+    println("further out, not nearer, when Lambda is forced to 3/16. So read the last")
+    println("ladder instead. Truncation is fixed in lattice units and nu is not, so at")
+    println("fixed Re and N a tau ladder walks; if its spread narrows with resolution,")
+    println("what is left after the box and the wall is the grid, and the answer is the")
+    println("same one the rest of this check keeps giving.")
     println()
 end
 
@@ -721,7 +813,8 @@ function main(args)
     if "--wall" in args
         wall_check(; device = device, max_settling = ft,
                    widths = quick ? (4.0, 6.0, 8.0) : (4.0, 6.0, 8.0, 12.0),
-                   taus = quick ? (0.505, 0.52, 0.56) : (0.505, 0.51, 0.52, 0.56))
+                   taus = quick ? (0.505, 0.52, 0.56) : (0.505, 0.51, 0.52, 0.56),
+                   resolutions = quick ? (13, 20) : (13, 20, 30))
         return
     end
 
