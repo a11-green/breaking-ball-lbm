@@ -1,0 +1,86 @@
+{
+    "latex-workshop.latex.tools": [
+        {
+            "name": "latexmk",
+            "command": "latexmk",
+            "args": [
+                "%DOCFILE_EXT%"
+            ]
+        },
+        {
+            "name": "latexmk-diff",
+            "command": "latexmk",
+            "args": [
+                "diff.tex" 
+            ]
+        },
+        {
+            "name": "generate-diff",
+            "command": "bash",
+            "args": ["./mkdiff.sh"]
+        },
+        {
+            "name": "latexmk-diff-cleanup",
+            "command": "latexmk",
+            "args": [
+                "-c",
+                "diff.tex"
+            ]
+        }
+    ],
+    "latex-workshop.latex.recipes": [
+        {
+            "name": "compile",
+            "tools": [
+                "latexmk",
+            ]
+        },
+        {
+            "name": "compile-diff",
+            "tools": [
+                "generate-diff",
+                "latexmk-diff",
+                "latexmk-diff-cleanup"
+            ]
+        }
+    ],
+    "latex-workshop.latex.autoBuild.run": "never",
+    "latex-workshop.view.pdf.viewer": "tab",
+    "latex-workshop.latex.autoClean.run": "onBuilt",
+    "latex-workshop.latex.clean.fileTypes": [
+        "*.aux",
+        "*.bbl",
+        "*.blg",
+        "*.idx",
+        "*.ind",
+        "*.lof",
+        "*.lot",
+        "*.out",
+        "*.toc",
+        "*.acn",
+        "*.acr",
+        "*.alg",
+        "*.glg",
+        "*.glo",
+        "*.gls",
+        "*.ist",
+        "*.fls",
+        "*.fdb_latexmk",
+        "*.synctex.gz",
+        "_minted*",
+        "*.nav",
+        "*.snm",
+        "*.vrb",
+        "*.run.xml",
+        "*.dvi",
+        "*.fdb_latexmk",
+        "*.fls",
+        "*.toc",
+        "*.bcf",
+        "*.dvi",
+        //"*.log",
+        //"*/*.log"
+    ],
+    "editor.wordSeparators": "./\\()\"'-:,.;<>~!@#$%^&*|+=[]{}`~?．。，、（）「」［］｛｝《》てにをはがのともへでや",
+    "editor.formatOnSave": false
+}

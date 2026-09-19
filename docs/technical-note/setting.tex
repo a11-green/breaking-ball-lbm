@@ -1,0 +1,85 @@
+% パッケージ
+\usepackage[dvipdfmx]{hyperref, graphicx}
+\usepackage{pxjahyper}
+\usepackage{siunitx} % SI単位
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{caption,subcaption}
+\usepackage[top=20truemm,bottom=20truemm,left=25truemm,right=25truemm]{geometry}
+\usepackage{here}
+\usepackage{ascmac} % 枠付き文章
+\usepackage{plistings}
+\usepackage{color}
+
+
+\hypersetup{
+    colorlinks=false, % リンクに色をつけない設定
+    bookmarks=true, % 以下ブックマークに関する設定
+    bookmarksnumbered=true,
+    pdfborder={0 0 0},
+    bookmarkstype=toc,
+}
+
+\newcommand{\linedhref}[2]{\underline{\href{#1}{\emph{#2}}}}
+
+% 接頭辞の設定
+\renewcommand{\figurename}{Fig.}
+\renewcommand{\tablename}{Table.}
+\newcommand\figref[1]{{図~\ref{fig:#1}}}
+\newcommand\tabref[1]{{表~\ref{tab:#1}}}
+\newcommand\eref[1]{{式~({\boldmath \ref{eq:#1}})}}
+\newcommand\secref[1]{{第~\ref{sec:#1}章}}
+\newcommand\ssecref[1]{{~\ref{sec:#1}節}}
+\def\abstractname{要旨}
+\def\prepartname{第}
+\def\postpartname{章}
+
+% 自作関数
+\newcommand{\divergence}{\mathrm{div}\,}  %ダイバージェンス
+\newcommand{\grad}{\mathrm{grad}\,}  %グラディエント
+\newcommand{\rot}{\mathrm{rot}\,}  %ローテーション
+\def\vector#1{\mbox{\boldmath $#1$}}
+\newcommand{\e}{\mathrm{e}} %自然対数
+\newcommand{\pdiff}[3]{
+    \if 1#1 \dfrac{\partial #2}{\partial #3}
+    \else \dfrac{\partial^{#1} #2}{\partial #3^{#1}}\fi
+}
+\newcommand{\Hline}[1]{\noalign{\hrule height #1}}
+
+% Captionの設定
+% \captionwidth=0.8\textwidth
+\captionsetup[figure]{font=small}
+\captionsetup[table]{font=small} %small=9pt,footnotesize=8pt}
+\abovecaptionskip=5pt
+\belowcaptionskip=0pt
+
+
+% listingsの設定
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolor}{rgb}{0.95,0.95,0.92}
+\lstset{
+    backgroundcolor=\color{backcolor},  
+    rulecolor={\color[gray]{0.5}},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    basicstyle=\ttfamily\footnotesize,
+    frame=single,
+    breaklines=true,    % 行が長くなった場合自動改行
+    keepspaces=true,   
+    breakindent=12pt,   % 自動改行時のインデント  
+    columns=fixed,      % 文字の間隔を統一
+    basewidth=0.5em,    % 文字の横のサイズを小さく
+    numbers=left,       % 行数の位置
+    numberstyle={\scriptsize},  % 行数のフォント
+    numbersep=5pt,   
+    stepnumber=1,       % 行数の増間
+    numbersep=2zw,      % 行数の余白
+    xrightmargin=1zw,   % 左の余白
+    xleftmargin=2zw,    % 右の余白
+    showspaces=false,  
+    showstringspaces=false, 
+    showtabs=false, 
+}
