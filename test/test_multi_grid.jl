@@ -148,6 +148,124 @@
         @test e32 < 0.02
     end
 
+    @testset "a ball on the deepest level" begin
+        geom2 = BaseballGeometry()
+        # Two patches, each centred, with the ball six nodes in radius on the
+        # deepest level — the same shape the two-level tests use, one deeper.
+        p1 = ((9, 9, 9), (24, 24, 24))
+        probe = GridChain(T, cdims, [p1], τc)
+        f1 = size(probe.levels[1].fine)[1:3]
+        p2 = ((f1[1] ÷ 4, f1[2] ÷ 4, f1[3] ÷ 4),
+              (3 * f1[1] ÷ 4, 3 * f1[2] ÷ 4, 3 * f1[3] ÷ 4))
+        ch = GridChain(T, cdims, [p1, p2], τc)
+        w = RotatingWall(geom2, size(finest_grid(ch))[1:3], geom2.radius / 6)
+        cf = ChainFlow(ch, w)
+        init_chain_flow!(cf, (x, y, z) -> (1.0, -0.05, 0.0, 0.0))
+
+        @testset "the footprint lands on the base grid" begin
+            # The ball is cut on the deepest level; the base level has no
+            # geometry of its own and must be told where the hole is, through
+            # two ratios. A mapping error puts the hole somewhere the ball is
+            # not, and the box mean then averages over the ball's interior.
+            @test count(cf.base_solid) > 0
+            @test flow_fluid_count(cf) == prod(cdims) - count(cf.base_solid)
+            idx = findall(cf.base_solid)
+            lo_s = ntuple(d -> minimum(x -> x[d], idx), 3)
+            hi_s = ntuple(d -> maximum(x -> x[d], idx), 3)
+            # A ball of six deepest nodes is 1.5 base nodes in radius, centred.
+            mid = (cdims .+ 1) ./ 2
+            @test all(abs.((lo_s .+ hi_s) ./ 2 .- mid) .<= 1)
+            @test all(hi_s .- lo_s .<= 4)
+
+            # Every solid base node maps to a solid deepest node, which is the
+            # property the mapping is for.
+            for c in idx
+                d = deepest_index(ch, c[1], c[2], c[3])
+                @test d !== nothing
+                @test w.wall.kind[d...] == BBL.SOLID_NODE
+            end
+        end
+
+        @testset "the loop's units come back in base terms" begin
+            # Force gains m² per level climbed and torque m³, so two levels are
+            # 16 and 64. Reported in the wrong power, the torque would be out by
+            # the size of a real spin-decay signal.
+            spin = (0.0, 0.0, 1.0e-3)
+            F, M = advance_flow!(ch, cf, 2, τc; spin = spin)
+            Fd, Md = chain_cycle_walls!(ch, w; spin = spin)   # deepest-level units
+            @test all(isfinite, F) && all(isfinite, M)
+            @test chain_force(Fd, 2, 2)[1] / Fd[1] ≈ 1 / 16 rtol = 1e-12
+            @test chain_torque(Md, 2, 2)[1] / Md[1] ≈ 1 / 64 rtol = 1e-12
+        end
+
+        @testset "the sub-cycle shortens with depth" begin
+            # The deepest level takes m^n steps per base step, so the seam
+            # travels that much further per base step and the re-cut is due that
+            # much sooner. At two levels it is a quarter of the one-level bound.
+            # **The same physical ball**, which is the comparison that means
+            # anything: the deepest level is twice as fine, so the same sphere
+            # is six of its nodes and three of the pair's fine ones. Holding
+            # `radius_nodes` fixed instead would compare two different balls,
+            # and the two effects — half the angle per step, twice the radius in
+            # nodes — would cancel and say the sub-cycle does not shorten.
+            spin = (0.0, 0.0, 2.0e-3)
+            deep = max_substeps(cf, spin, 0.25)
+
+            rg = TwoGrid(T, cdims, p1[1], p1[2], τc)
+            rf = RefinedFlow(rg, RotatingWall(geom2, size(rg.fine)[1:3], geom2.radius / 3))
+            shallow = max_substeps(rf, spin, 0.25)
+            @test deep <= shallow ÷ 2 + 2         # even numbers, so allow the rounding
+            @test deep >= 2
+        end
+
+        @testset "a re-cut moves the footprint with it" begin
+            before = copy(cf.base_solid)
+            q = BBL.Quat{T}(cos(0.4), 0.0, 0.0, sin(0.4))
+            fresh = maybe_recut!(ch, cf, q, (0.0, 0.0, 1.0e-3), 0.0)
+            @test fresh >= 0
+            @test flow_fluid_count(cf) == prod(cdims) - count(cf.base_solid)
+            # The sphere is rotationally symmetric, so the footprint of a
+            # *seamed* ball may move by a node or two but cannot move far.
+            @test count(xor.(before, cf.base_solid)) <= 8
+        end
+
+        @testset "the coupled loop flies it" begin
+            # The chain answers the same three questions as every other backend,
+            # so `couple_step!` should not know how deep it is. If it does, the
+            # depth has leaked into the loop and the next level would leak again.
+            units = LatticeUnits(T; nodes_per_diameter = 6, speed = 39.0,
+                                 lattice_speed = 0.05, ν = 39.0 * 0.0748 / 40)
+            props = BaseballProperties(T)
+            ball = BallState(T; position = (2.0, 0.0, 1.8), velocity = (39.0, 0.0, 0.0),
+                             spin = spin_from_rpm((0.0, 0.0, 1.0), 2708))
+            run = PitchRun(units, props; substeps = 2, control_time = 100)
+            st = PitchState(ball)
+
+            ch2 = GridChain(T, cdims, [p1, p2], τc)
+            w2 = RotatingWall(geom2, size(finest_grid(ch2))[1:3], geom2.radius / 6)
+            cf2 = ChainFlow(ch2, w2)
+            init_chain_flow!(cf2, (x, y, z) -> (1.0, -0.05, 0.0, 0.0))
+
+            for _ in 1:4
+                couple_step!(ch2, run, st, cf2)
+            end
+            @test all(isfinite, st.force)
+            @test all(isfinite, st.torque)
+            @test st.force[1] < 0                      # drag opposes the flight
+            @test st.ball.v[1] < 39.0                  # and slows it
+            @test st.ball.t > 0
+            @test isfinite(couple_residual(run, st, cf2))
+            @test flow_fluid_count(cf2) < prod(cdims)
+        end
+
+        @testset "it refuses a ball the patch cannot hold" begin
+            big = RotatingWall(geom2, size(finest_grid(ch))[1:3], geom2.radius / 20)
+            @test_throws ArgumentError ChainFlow(ch, big)
+            wrong = RotatingWall(geom2, (9, 9, 9), geom2.radius / 6)
+            @test_throws ArgumentError ChainFlow(ch, wrong)
+        end
+    end
+
     @testset "it refuses a patch that does not fit" begin
         @test_throws ArgumentError GridChain(T, cdims, [], τc)
         @test_throws ArgumentError GridChain(T, cdims, [((1, 1, 1), (24, 24, 24))], τc)

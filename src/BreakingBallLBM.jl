@@ -44,6 +44,7 @@ include("postprocess/pitch_view.jl")
 include("postprocess/vtk.jl")
 include("config.jl")
 include("refine/refined_flow.jl")
+include("refine/chain_flow.jl")
 include("validation/sphere_array.jl")
 
 export LBMState, Lattice, D3Q19, D3Q27,
@@ -75,6 +76,7 @@ export LBMState, Lattice, D3Q19, D3Q27,
     TwoGrid, fine_tau, neq_rescale, fine_force, grid_sizes, check_patch,
     GridChain, levels, level_taus, base_grid, finest_grid, chain_sizes,
     chain_cycle_walls!, chain_force, chain_torque, init_chain!, level_origin,
+    ChainFlow, init_chain_flow!, refresh_base_solid!, deepest_index,
     interface_fill!, restrict!, save_coarse!, refine_cycle!,
     init_refined!, level_macroscopic, node_macroscopic,
     TrajectorySamples, samples, break_references, seam_world, spin_axis_world,
