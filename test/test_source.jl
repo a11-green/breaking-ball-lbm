@@ -160,6 +160,34 @@
         @test "DeviceTwoGrid" in signature_types("flow_mean_velocity")   # spans lines
     end
 
+    @testset "the extension loads only what it may" begin
+        # An extension can `using` its parent package, the parent's [deps] and
+        # the [weakdeps] that trigger it — nothing else, not even a standard
+        # library. Loading anything else is a precompilation error on the
+        # machine with the GPU and nowhere else, which is the third time that
+        # has happened here (`Random`, for a benchmark's shuffle).
+        proj = read(joinpath(root, "Project.toml"), String)
+        section(name) = begin
+            m = match(Regex("\\[" * name * "\\]\\n((?:[^\\[]*\\n)*)"), proj)
+            m === nothing ? String[] :
+            [strip(first(split(l, "="))) for l in split(m.captures[1], '\n') if occursin("=", l)]
+        end
+        allowed = Set(vcat(section("deps"), section("weakdeps"), ["BreakingBallLBM"]))
+
+        for path in filter(f -> endswith(f, ".jl"),
+                           readdir(joinpath(root, "ext"); join = true))
+            for (n, l) in enumerate(eachline(path))
+                m = match(r"^\s*(?:using|import)\s+([A-Za-z_][A-Za-z0-9_]*)", l)
+                m === nothing && continue
+                mod = m.captures[1]
+                @test mod in allowed ||
+                      error("$(basename(path)):$n loads `$mod`, which is not in " *
+                            "Project.toml's [deps] or [weakdeps] — an extension " *
+                            "cannot load it. Known: $(join(sort(collect(allowed)), ", "))")
+            end
+        end
+    end
+
     @testset "the package defines before it dispatches" begin
         # Across files, the order is the include list rather than the file
         # system's.

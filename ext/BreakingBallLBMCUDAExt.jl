@@ -12,7 +12,6 @@ module BreakingBallLBMCUDAExt
 using BreakingBallLBM
 using CUDA
 using StaticArrays
-using Random: randperm
 
 const BBL = BreakingBallLBM
 
@@ -108,10 +107,31 @@ reached through a lookup instead of by adding a stride. This measures what that
 lookup costs on the card that would pay it: the same bytes moved, once by
 address arithmetic and once by indirection.
 
-The index here is a *shuffled* permutation, which is the honest case — a
-body-fitted patch's neighbour list is contiguous in no direction, and an index
-that happened to be sorted would measure the cache rather than the mechanism.
+The index here is a *shuffled* permutation, which is the honest case at one end
+— an index that happened to be sorted would measure the cache rather than the
+mechanism. It is an upper bound on the penalty, though: a real body-fitted list
+would be numbered with some locality, so the true cost of leaving a dense array
+sits between this and the direct copy.
+
+The shuffle is written out rather than taken from `Random`, because an extension
+may only load what its parent package depends on, and a benchmark is not a
+reason to make the whole package depend on anything. Being deterministic is a
+bonus: the number is the same on two runs of the same machine.
 """
+"""Fisher-Yates with a xorshift, so the permutation is reproducible."""
+function shuffled_index(n::Integer)
+    idx = collect(Int32(1):Int32(n))
+    state = UInt64(0x2545F4914F6CDD1D)
+    @inbounds for i in n:-1:2
+        state ⊻= state << 13
+        state ⊻= state >> 7
+        state ⊻= state << 17
+        j = Int(state % UInt64(i)) + 1
+        idx[i], idx[j] = idx[j], idx[i]
+    end
+    return idx
+end
+
 function gather_kernel!(dst, src, idx)
     i = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
     stride = blockDim().x * gridDim().x
@@ -127,7 +147,7 @@ function BreakingBallLBM.gpu_gather_bandwidth(::Type{T} = Float32; n = 16_000_00
                                               repeats = 20) where {T}
     src = CUDA.rand(T, n)
     dst = CUDA.zeros(T, n)
-    idx = CuArray(Int32.(randperm(n)))
+    idx = CuArray(shuffled_index(n))
     threads = 256
     blocks = min(cld(n, threads), 8192)
     @cuda threads = threads blocks = blocks gather_kernel!(dst, src, idx)
