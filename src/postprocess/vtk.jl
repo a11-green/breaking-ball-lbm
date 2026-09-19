@@ -162,3 +162,68 @@ function write_snapshot(path::AbstractString, g, solid::AbstractArray{Bool,3};
                      ["velocity" => sub4(u), "vorticity" => sub4(ω)];
                      spacing = spacing * stride, origin = off, title = title)
 end
+
+"""
+    write_polylines(path, lines; names, title)
+
+Legacy VTK `POLYDATA`, binary, holding one or more polylines given as vectors of
+`(x, y, z)` in the same world coordinates [`write_snapshot`](@ref) uses.
+
+**Why a separate file rather than a field in the volume.** A sphere looks the
+same at every orientation, so the flow snapshots alone show a spinning ball as a
+still picture — and where the seam is relative to the airflow is the entire
+subject (§4.1). Marking seam cells in the volume would not work either: the seam
+stands 0.79 mm proud of the cover and the deepest level's spacing is close to
+that, so at the resolutions this project can reach the seam is a sub-cell
+feature that no volume field can draw. As a curve it is exact at any resolution
+and costs a few kilobytes a frame.
+
+Each line carries an integer `line_id` cell scalar so a viewer can colour or
+filter them apart — the seam and the spin axis go in one file and want different
+widths. `names` is written into the title line, which is where a reader opening
+the file by hand will look to find out which id is which.
+"""
+function write_polylines(path::AbstractString,
+                         lines::AbstractVector{<:AbstractVector{<:NTuple{3,<:Real}}};
+                         names::AbstractVector{<:AbstractString} = String[],
+                         title::AbstractString = "breaking-ball-lbm")
+    isempty(lines) && throw(ArgumentError("no lines to write"))
+    any(isempty, lines) && throw(ArgumentError("a line with no points cannot be drawn"))
+    isempty(names) || length(names) == length(lines) ||
+        throw(DimensionMismatch("$(length(names)) names for $(length(lines)) lines"))
+
+    npoints = sum(length, lines)
+    header = isempty(names) ? title : string(title, " [", join(names, ", "), "]")
+    put(io, x) = write(io, hton(Float32(x)))
+
+    open(path, "w") do io
+        println(io, "# vtk DataFile Version 3.0")
+        println(io, header)
+        println(io, "BINARY")
+        println(io, "DATASET POLYDATA")
+        println(io, "POINTS $npoints float")
+        for line in lines, p in line
+            put(io, p[1]); put(io, p[2]); put(io, p[3])
+        end
+        # LINES is a count, a total size, and then one (n, indices...) record per
+        # line — indices into the flat point list, zero-based.
+        println(io)
+        println(io, "LINES $(length(lines)) $(npoints + length(lines))")
+        base = 0
+        for line in lines
+            write(io, hton(Int32(length(line))))
+            for k in 0:(length(line) - 1)
+                write(io, hton(Int32(base + k)))
+            end
+            base += length(line)
+        end
+        println(io)
+        println(io, "CELL_DATA $(length(lines))")
+        println(io, "SCALARS line_id float 1")
+        println(io, "LOOKUP_TABLE default")
+        for k in 1:length(lines)
+            put(io, k)
+        end
+    end
+    return path
+end

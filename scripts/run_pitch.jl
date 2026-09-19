@@ -167,6 +167,9 @@ function parse_args(args)
               --snapshot-crop D    half-width written, in diameters (default $(c.snapshot_crop))
               --snapshot-stride S  write every S-th node (default $(c.snapshot_stride))
               --snapshot-dir DIR   where they go (default $(c.snapshot_dir))
+                                   each frame writes two files: the flow volume and
+                                   the seam curve plus spin axis, with a .vtk.series
+                                   each so a viewer reads both on the same clock
               --overview           also write one snapshot of the whole domain after
                                    spin-up: the box, the wake to the outlet, and
                                    where the refined patch sits
@@ -421,8 +424,9 @@ function main(args)
     if c.snapshot > 0
         mkpath(c.snapshot_dir)
         stale = filter(f -> occursin(r"^flow-\d+\.vtk$", f) ||
+                            occursin(r"^seam-\d+\.vtk$", f) ||
                             occursin(r"^overview-\w+\.vtk$", f) ||
-                            f == "flow.vtk.series",
+                            f == "flow.vtk.series" || f == "seam.vtk.series",
                        readdir(c.snapshot_dir))
         if !isempty(stale)
             foreach(f -> rm(joinpath(c.snapshot_dir, f)), stale)
@@ -518,16 +522,18 @@ function main(args)
     # seconds, and the viewer is given that list instead of a wildcard.
     snapshots = 0
     series = Tuple{String,Float64}[]
+    seam_series = Tuple{String,Float64}[]
     series_path = joinpath(c.snapshot_dir, "flow.vtk.series")
+    seam_series_path = joinpath(c.snapshot_dir, "seam.vtk.series")
 
-    function write_series()
-        open(series_path, "w") do io
+    function write_series(path, frames)
+        open(path, "w") do io
             println(io, "{")
             println(io, "  \"file-series-version\" : \"1.0\",")
             println(io, "  \"files\" : [")
-            for (n, (name, t)) in enumerate(series)
+            for (n, (name, t)) in enumerate(frames)
                 @printf(io, "    { \"name\" : \"%s\", \"time\" : %.6f }%s\n",
-                        name, t, n == length(series) ? "" : ",")
+                        name, t, n == length(frames) ? "" : ",")
             end
             println(io, "  ]")
             println(io, "}")
@@ -561,9 +567,34 @@ function main(args)
                        title = @sprintf("t = %.4f s, |V| = %.2f m/s", s.ball.t,
                                         speed(s.ball)))
         push!(series, (name, Float64(s.ball.t)))
+
+        # **The seam, as a curve, in the same metres.** A node at index `i` on
+        # this level sits at `origin + spacing (i - 1)`, so the ball's centre —
+        # which is `ctr` in index units, and does not move, because the frame
+        # rides with it — is that expression at `ctr`. The crop does not enter:
+        # it moves where the *file* starts, not where the lattice is.
+        #
+        # Without this the animation is a still picture. The ball is a sphere;
+        # only the seam shows that it is turning, and the seam's angle to the
+        # oncoming air is the mechanism the whole project is about (§4.1). The
+        # spin axis goes in the same file as a second line, since that is the
+        # other thing a snapshot cannot show.
+        ball_world = ntuple(d -> origin[d] + spacing * (ctr[d] - 1), 3)
+        seam_name = @sprintf("seam-%05d.vtk", tag)
+        seam_path = joinpath(c.snapshot_dir, seam_name)
+        write_polylines(seam_path,
+                        [seam_world(geom, s.ball.q, ball_world; samples = 360),
+                         collect(spin_axis_world(s.ball, ball_world,
+                                                 3 * geom.radius))];
+                        names = ["seam", "spin axis"],
+                        title = @sprintf("t = %.4f s, %.0f rpm", s.ball.t,
+                                         spin_rpm(s.ball)))
+        push!(seam_series, (seam_name, Float64(s.ball.t)))
+
         # Rewritten after every frame, so a run that is interrupted still leaves
         # a series that names exactly the frames it managed to write.
-        write_series()
+        write_series(series_path, series)
+        write_series(seam_series_path, seam_series)
         snapshots += 1
         return path
     end
@@ -628,12 +659,36 @@ function main(args)
     function sample!(s)
         cycles += 1
         CD, CL, Cs = aerodynamic_coefficients(s.force, s.ball, props)
+        # **Everything a later pass could want, not just what the run prints.**
+        # Re-integrating for a pfx reference (§8) needs the trajectory; redrawing
+        # the ball needs its orientation; checking the frame needs the free
+        # stream the faces were actually given and the acceleration the body
+        # force was actually carrying. None of that can be recovered afterwards
+        # from a file that only has position and coefficients, and the run is
+        # too expensive to repeat for a column that was left out.
+        #
+        # The free stream is `-v`: the frame rides with the ball, so the air
+        # arrives at the ball's speed reversed (§4.4). `u_lat` is the same
+        # vector in lattice units, which is the number the inlet is handed.
+        u_in = .-s.ball.v
+        u_lat = to_lattice_velocity(units, u_in)
         push!(rows, (t = s.ball.t, x = s.ball.x[1], y = s.ball.x[2], z = s.ball.x[3],
                      vx = s.ball.v[1], vy = s.ball.v[2], vz = s.ball.v[3],
+                     speed = speed(s.ball),
+                     u_in_x = u_in[1], u_in_y = u_in[2], u_in_z = u_in[3],
+                     u_lat_x = u_lat[1], u_lat_y = u_lat[2], u_lat_z = u_lat[3],
                      CD = CD, CL = CL, Cside = Cs,
                      Fx = s.force[1], Fy = s.force[2], Fz = s.force[3],
                      Tx = s.torque[1], Ty = s.torque[2], Tz = s.torque[3],
-                     rpm = spin_rpm(s.ball), steps = s.steps, fresh = s.fresh))
+                     wx = s.ball.ω[1], wy = s.ball.ω[2], wz = s.ball.ω[3],
+                     qw = s.ball.q.w, qx = s.ball.q.x, qy = s.ball.q.y,
+                     qz = s.ball.q.z,
+                     ax_lat = s.control[1], ay_lat = s.control[2],
+                     az_lat = s.control[3],
+                     um_lat_x = s.mean_velocity[1], um_lat_y = s.mean_velocity[2],
+                     um_lat_z = s.mean_velocity[3],
+                     rpm = spin_rpm(s.ball), steps = s.steps, fresh = s.fresh,
+                     recuts = flow_recuts(flow)))
 
         if c.snapshot > 0 && cycles % c.snapshot == 0
             snapshot!(s, cycles)
@@ -665,6 +720,9 @@ function main(args)
         # Frame zero, numbered rather than named, so it sorts where it belongs.
         p0 = snapshot!(st, 0)
         p0 === nothing || println("Snapshot    ", p0, "  (series: ", series_path, ")")
+        p0 === nothing || println("Seam        ", seam_series_path,
+                                  "  — open it beside the flow series; the seam and",
+                                  " the spin axis are lines 1 and 2")
     end
     overview!(st)
     println()

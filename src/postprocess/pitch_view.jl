@@ -118,16 +118,25 @@ end
 
 """
     spin_axis_world(state, length)
+    spin_axis_world(state, centre, length)
 
 The spin axis through the ball's centre, as two endpoints — the other thing a
 still picture cannot show.
+
+The second form places it at `centre` instead of at `state.x`. The CFD run needs
+that one: inside the ball-following box the ball sits wherever the lattice puts
+it and stays there, while `state.x` is marching down the world trajectory, so
+the two are different points and only the first is where the flow is.
 """
-function spin_axis_world(b::BallState{T}, len::Real) where {T}
+function spin_axis_world(b::BallState{T}, centre::NTuple{3,<:Real}, len::Real) where {T}
+    c = T.(centre)
     n = sqrt(sum(abs2, b.ω))
-    n == 0 && return (b.x, b.x)
+    n == 0 && return (c, c)
     d = (T(len) / 2 / n) .* b.ω
-    return (b.x .- d, b.x .+ d)
+    return (c .- d, c .+ d)
 end
+
+spin_axis_world(b::BallState, len::Real) = spin_axis_world(b, b.x, len)
 
 """
 Named pitches, as a spin axis and a release speed.
