@@ -160,6 +160,45 @@
         @test "DeviceTwoGrid" in signature_types("flow_mean_velocity")   # spans lines
     end
 
+    @testset "every docstring documents something" begin
+        # A docstring has to be followed by a definition. Insert one between an
+        # existing docstring and the thing it described and the first now
+        # documents the second *string*, which Julia refuses at load time —
+        # again only where the file is loaded, which for `ext/` means the
+        # machine with the GPU. It has happened twice.
+        function orphaned(path)
+            ex = Meta.parse("begin\n" * read(path, String) * "\nend")
+            found = String[]
+            walk(e) = begin
+                e isa Expr || return
+                if e.head === :macrocall && length(e.args) >= 4 &&
+                   e.args[1] === GlobalRef(Core, Symbol("@doc"))
+                    e.args[4] isa AbstractString &&
+                        push!(found, first(split(strip(String(e.args[3])), '\n')))
+                end
+                foreach(walk, e.args)
+            end
+            walk(ex)
+            return found
+        end
+
+        for dir in ("src", "ext"), path in readdir(joinpath(root, dir); join = true)
+            endswith(path, ".jl") || continue
+            for d in orphaned(path)
+                @test false ||
+                      error("$(basename(path)): a docstring starting \"$d\" " *
+                            "documents a string, not a definition")
+            end
+            @test isempty(orphaned(path))
+        end
+        for sub in ("core", "boundary", "geometry", "refine", "trajectory",
+                    "postprocess", "turbulence", "validation")
+            for path in readdir(joinpath(root, "src", sub); join = true)
+                endswith(path, ".jl") && @test isempty(orphaned(path))
+            end
+        end
+    end
+
     @testset "the extension loads only what it may" begin
         # An extension can `using` its parent package, the parent's [deps] and
         # the [weakdeps] that trigger it — nothing else, not even a standard

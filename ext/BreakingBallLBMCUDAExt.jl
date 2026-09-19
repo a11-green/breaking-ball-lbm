@@ -96,6 +96,20 @@ function BreakingBallLBM.gpu_copy_bandwidth(::Type{T} = Float32; n = 64_000_000,
 end
 
 
+"""Fisher-Yates with a xorshift, so the permutation is reproducible."""
+function shuffled_index(n::Integer)
+    idx = collect(Int32(1):Int32(n))
+    state = UInt64(0x2545F4914F6CDD1D)
+    @inbounds for i in n:-1:2
+        state ⊻= state << 13
+        state ⊻= state >> 7
+        state ⊻= state << 17
+        j = Int(state % UInt64(i)) + 1
+        idx[i], idx[j] = idx[j], idx[i]
+    end
+    return idx
+end
+
 """
 The same copy, but through an index — the price of leaving a dense array.
 
@@ -118,20 +132,6 @@ may only load what its parent package depends on, and a benchmark is not a
 reason to make the whole package depend on anything. Being deterministic is a
 bonus: the number is the same on two runs of the same machine.
 """
-"""Fisher-Yates with a xorshift, so the permutation is reproducible."""
-function shuffled_index(n::Integer)
-    idx = collect(Int32(1):Int32(n))
-    state = UInt64(0x2545F4914F6CDD1D)
-    @inbounds for i in n:-1:2
-        state ⊻= state << 13
-        state ⊻= state >> 7
-        state ⊻= state << 17
-        j = Int(state % UInt64(i)) + 1
-        idx[i], idx[j] = idx[j], idx[i]
-    end
-    return idx
-end
-
 function gather_kernel!(dst, src, idx)
     i = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
     stride = blockDim().x * gridDim().x
