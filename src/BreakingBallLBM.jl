@@ -58,7 +58,7 @@ export LBMState, Lattice, D3Q19, D3Q27,
     cube_velocity, cube_opposite, cube_weight, cube_equilibrium,
     to_cube_order!, from_cube_order!, aa_gather!, aa_scatter!, collide_buffer!,
     aa_step_node!, aa_run!, gpu_run!, gpu_run_walls!, gpu_wall, gpu_flow, gpu_rotating_flow,
-    gpu_two_grid, gpu_refined_flow,
+    gpu_two_grid, gpu_refined_flow, gpu_gather_bandwidth,
     gpu_copy_bandwidth, gpu_backend_loaded,
     Smagorinsky, total_relaxation_time, eddy_viscosity, nonequilibrium_flux_norm,
     strain_rate_magnitude,
@@ -179,6 +179,7 @@ function gpu_refined_flow end
 Move a [`GridChain`](@ref) or a [`ChainFlow`](@ref) to the device, sharing the
 arrays between levels as the host chain does. Defined by the CUDA extension.
 """
+function gpu_gather_bandwidth end
 function gpu_chain end
 function gpu_chain_flow end
 

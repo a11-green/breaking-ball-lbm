@@ -74,6 +74,13 @@ Base.@kwdef mutable struct PitchConfig
     # in a settings file still means one level, so files written before the
     # second level existed still say what they said.
     refine::Vector{Float64} = Float64[]
+    # Extra streamwise length, per level, added on the **downstream** side only.
+    # A patch centred on the ball follows its wake exactly as far as it leaves
+    # run-up in front of it, and those two are not worth the same: the flow
+    # ahead is smooth within half a diameter, while the separation and the shear
+    # layer behind extend further than that at any Reynolds number this project
+    # runs at. Zero is the cube, which is what this was before.
+    refine_wake::Vector{Float64} = Float64[]
     # Open streamwise faces (§4.4.2.1). Without them the box is periodic and
     # the ball flies through its own wake, which V&V-2 measured as the largest
     # error in the whole configuration — the stream arriving at the ball was a
@@ -149,6 +156,9 @@ function parse_args(args)
                                    so on (§6.5.1 — the only way to get a seam worth
                                    the name in an eight-diameter domain). The first
                                    should be at least 3, each later one smaller
+              --refine-wake W[,X]  extend each patch by W diameters downstream only,
+                                   so it follows the wake further than it leaves
+                                   run-up (default 0: a cube)
               --smagorinsky C      subgrid constant, 0 to rely on the operator's own
                                    dissipation (default $(c.smagorinsky))
               --cpu                force the host path even if a GPU is present
@@ -189,6 +199,7 @@ function parse_args(args)
         elseif a == "--spinup";     c.spinup = parse(Int, take())
         elseif a == "--spinup-flowthroughs"; c.spinup_flowthroughs = parse(Float64, take())
         elseif a == "--refine";     c.refine = parse.(Float64, split(take(), ','))
+        elseif a == "--refine-wake"; c.refine_wake = parse.(Float64, split(take(), ','))
         elseif a == "--smagorinsky"; c.smagorinsky = parse(Float64, take())
         elseif a == "--cpu";        c.device = false
         elseif a == "--out";        c.out = take()
@@ -251,12 +262,19 @@ function plan(c::PitchConfig)
     for (k, P) in enumerate(c.refine)
         res = c.resolution * 2^k                     # this level's nodes per diameter
         parent_res = c.resolution * 2^(k - 1)
-        side = 4 * round(Int, P * parent_res / 2) + 1
-        gib_k = side^3 * (27 * sizeof(T) + 8) / 2^30
+        half = round(Int, P * parent_res / 2)
+        wake = k <= length(c.refine_wake) ? round(Int, c.refine_wake[k] * parent_res) : 0
+        # The patch is only a cube when nothing was added downstream, and an
+        # estimate that assumed one would be short by exactly the part that was
+        # added on purpose.
+        nx = 2 * (2 * half + wake) + 1
+        ny = 4 * half + 1
+        gib_k = nx * ny^2 * (27 * sizeof(T) + 8) / 2^30
         gib_fine += gib_k
         budget = grid_budget(; nodes_per_diameter = res, domain_diameters = P)
-        @printf("Refined     level %d: %.2f D patch at %d/D, %d³ nodes, %.3f mm, seam %.2f cells, %.2f GiB\n",
-                k, P, res, side, budget.dx_mm, budget.seam_cells, gib_k)
+        @printf("Refined     level %d: %.2f D wide, %.2f D long at %d/D, %d x %d x %d nodes, %.3f mm, seam %.2f cells, %.2f GiB\n",
+                k, P, P + (k <= length(c.refine_wake) ? c.refine_wake[k] : 0.0), res,
+                nx, ny, ny, budget.dx_mm, budget.seam_cells, gib_k)
     end
     # The warning below should judge whatever resolves the ball, which is the
     # deepest level when there is one.
@@ -341,6 +359,7 @@ function main(args)
     spin_lat = lattice_spin(units, ball)
 
     local wall, flow, state_arg
+    ball_in_deepest = (one(T), one(T), one(T))   # the ball's index on the deepest level
     if !isempty(c.refine)
         # **The first patch goes where the ball is**, which with open faces is
         # not the middle of the grid: `RotatingWall` centres the ball in the
@@ -353,11 +372,18 @@ function main(args)
         for (k, P) in enumerate(c.refine)
             parent_res = c.resolution * 2^(k - 1)
             half = round(Int, P * parent_res / 2)
-            lo = ntuple(d -> mid[d] - half, 3)
+            # The stream runs along -x, so the wake is at lower x and the extra
+            # length goes on that side. The ball stays where it is; the box
+            # around it stops being symmetric.
+            wake = k <= length(c.refine_wake) ?
+                   round(Int, c.refine_wake[k] * parent_res) : 0
+            lo = (mid[1] - half - wake, mid[2] - half, mid[3] - half)
             hi = ntuple(d -> mid[d] + half, 3)
             all(lo .>= 2) && all(hi .<= parent_dims .- 1) ||
-                error("refinement level $k ($(P) D) does not fit inside the level " *
-                      "above it ($(parent_dims)): lower --refine's $(k)th entry")
+                error("refinement level $k spans $lo..$hi in the level above it, " *
+                      "which is $parent_dims — it has to leave a node on every " *
+                      "side. Lower entry $k of --refine ($(P) D) or of " *
+                      "--refine-wake, or raise the entry above it.")
             if k == 1 && c.open_faces
                 depth = OpenChannel{T}().depth
                 (lo[1] > depth + 1 && hi[1] < dims[1] - depth) ||
@@ -366,11 +392,21 @@ function main(args)
             end
             push!(patches, (lo, hi))
             parent_dims = ntuple(d -> 2 * (hi[d] - lo[d]) + 1, 3)
+            # Where the ball now is, in the patch's own indices: still the
+            # centre laterally, but offset streamwise by whatever was added.
             mid = (parent_dims .+ 1) .÷ 2
+            mid = (mid[1] + wake, mid[2], mid[3])
         end
         chain = GridChain(T, dims, patches, units.τ)
+        # **Where the ball is in the deepest grid, stated rather than assumed.**
+        # `RotatingWall` centres it by default, and with a patch that is longer
+        # downstream the centre is not where the ball was placed — it would be
+        # displaced by half the extra length, silently, and the run-up would
+        # again not be the one asked for.
+        ball_at = T.(mid)
+        ball_in_deepest = ball_at
         wall = RotatingWall(geom, size(finest_grid(chain))[1:3],
-                            units.dx / 2^length(patches))
+                            units.dx / 2^length(patches); center = ball_at)
         flow = ChainFlow(chain, wall)
         state_arg = chain
     else
@@ -514,7 +550,7 @@ function main(args)
                                 level_origin(g, length(g))
         spacing = units.dx * h
         origin = T.((base_origin .- 1) .* units.dx)
-        ctr = deep ? centre3 : (size(level)[1:3] .+ 1) ./ 2
+        ctr = deep ? centre3 : ball_in_deepest
         crop = c.snapshot_crop * c.resolution / h
 
         name = @sprintf("flow-%05d.vtk", tag)

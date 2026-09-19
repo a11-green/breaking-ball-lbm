@@ -12,6 +12,7 @@ module BreakingBallLBMCUDAExt
 using BreakingBallLBM
 using CUDA
 using StaticArrays
+using Random: randperm
 
 const BBL = BreakingBallLBM
 
@@ -95,6 +96,53 @@ function BreakingBallLBM.gpu_copy_bandwidth(::Type{T} = Float32; n = 64_000_000,
     return 2 * sizeof(T) * n * repeats / t     # bytes read + written, per second
 end
 
+
+"""
+The same copy, but through an index — the price of leaving a dense array.
+
+**What this decides.** A patch shaped to the body (a sphere, or a shell hugging
+the surface) holds about half the nodes of the cube that contains it, which
+looks like a halving of the cost. It is only a saving if those nodes are stored
+as a list rather than as a dense box, and a list means every neighbour is
+reached through a lookup instead of by adding a stride. This measures what that
+lookup costs on the card that would pay it: the same bytes moved, once by
+address arithmetic and once by indirection.
+
+The index here is a *shuffled* permutation, which is the honest case — a
+body-fitted patch's neighbour list is contiguous in no direction, and an index
+that happened to be sorted would measure the cache rather than the mechanism.
+"""
+function gather_kernel!(dst, src, idx)
+    i = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
+    stride = blockDim().x * gridDim().x
+    n = length(dst)
+    while i <= n
+        @inbounds dst[i] = src[idx[i]]
+        i += stride
+    end
+    return nothing
+end
+
+function BreakingBallLBM.gpu_gather_bandwidth(::Type{T} = Float32; n = 16_000_000,
+                                              repeats = 20) where {T}
+    src = CUDA.rand(T, n)
+    dst = CUDA.zeros(T, n)
+    idx = CuArray(Int32.(randperm(n)))
+    threads = 256
+    blocks = min(cld(n, threads), 8192)
+    @cuda threads = threads blocks = blocks gather_kernel!(dst, src, idx)
+    CUDA.synchronize()
+    t = CUDA.@elapsed begin
+        for _ in 1:repeats
+            @cuda threads = threads blocks = blocks gather_kernel!(dst, src, idx)
+        end
+    end
+    CUDA.unsafe_free!(src)
+    CUDA.unsafe_free!(dst)
+    CUDA.unsafe_free!(idx)
+    # Bytes the algorithm needs: the value read, the value written, the index.
+    return (2 * sizeof(T) + sizeof(Int32)) * n * repeats / t
+end
 
 """
 Wall-bounded step.

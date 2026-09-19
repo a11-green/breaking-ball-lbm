@@ -523,7 +523,14 @@ function main()
     # Measure the ceiling rather than trusting a datasheet number: the 3060 Ti
     # ships with both GDDR6 (448 GB/s) and GDDR6X (608 GB/s) memory.
     bw = gpu_copy_bandwidth(Float32)
-    @printf("Measured copy bandwidth: %.0f GB/s\n\n", bw / 1e9)
+    @printf("Measured copy bandwidth: %.0f GB/s\n", bw / 1e9)
+    # What a body-fitted patch would cost: the same bytes, reached through an
+    # index instead of a stride. A sphere holds about half the nodes of the cube
+    # around it, so indirection has to cost less than a factor of two for the
+    # shape to pay for itself.
+    gbw = gpu_gather_bandwidth(Float32)
+    @printf("Indexed (gather) bandwidth: %.0f GB/s — %.2fx the direct one\n\n",
+            gbw / 1e9, gbw / bw)
 
     println("Throughput")
     @printf("%-9s %-16s %-6s %-12s %-10s %-12s\n",
