@@ -517,6 +517,8 @@ function main(args)
     function overview!(s)
         c.overview || return
         mkpath(c.snapshot_dir)
+        println("Overview    (the solver's grid, and the one written — `overview_stride` " *
+                "thins the second)")
         written = String[]
         levels = c.refine > 0 ?
             [("coarse", g.coarse, flow_coarse_solid(flow), units.dx,
@@ -527,12 +529,24 @@ function main(args)
               (zero(T), zero(T), zero(T)))]
         for (name, level, mask, spacing, origin) in levels
             path = joinpath(c.snapshot_dir, "overview-$name.vtk")
+            # **What is thinned is the grid, not just the amount of data.** The
+            # file is an ImageData whose spacing is `stride` times the solver's,
+            # so a viewer showing cell edges shows cells that size — the extents
+            # are exact, the discretisation drawn is not. The log therefore
+            # states both, since only one of them is in the file.
+            full = size(level)[1:3]
+            kept = ntuple(d -> length(1:c.overview_stride:full[d]), 3)
+            bytes = prod(kept) * 11 * 4              # 5 scalars + 2 vectors, Float32
+            @printf("            %-6s grid %d x %d x %d at %.3f mm -> writing %d x %d x %d at %.3f mm, %.0f MB\n",
+                    name, full..., 1000 * spacing, kept..., 1000 * spacing * c.overview_stride,
+                    bytes / 1e6)
+            flush(stdout)
             write_snapshot(path, level, mask; crop = nothing,
                            stride = c.overview_stride, spacing = spacing,
                            origin = origin,
                            title = @sprintf("%s level, whole domain, t = %.4f s",
                                             name, s.ball.t))
-            push!(written, @sprintf("%s (%.0f MB)", path, filesize(path) / 1e6))
+            push!(written, path)
         end
         println("Overview    ", join(written, ", "))
         return written
