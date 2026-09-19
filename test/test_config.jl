@@ -6,6 +6,7 @@
         axis::NTuple{3,Float64} = (0.0, 0.0, 1.0)
         out::String = "pitch.csv"
         open_faces::Bool = false
+        refine::Vector{Float64} = Float64[]
     end
 
     @testset "writing then reading is the identity" begin
@@ -13,7 +14,7 @@
         # must be repeatable from what it printed.
         a = Settings(resolution = 33, domain = 6.5, precision = :f64,
                      axis = (0.15, -1.0, 0.25), out = "run/two.csv",
-                     open_faces = true)
+                     open_faces = true, refine = [3.0, 1.5])
         path = tempname() * ".toml"
         write(path, settings_toml(a))
         b = load_settings!(Settings(), path)
@@ -32,6 +33,14 @@
         @test load_settings!(Settings(), Dict("precision" => "f64")).precision === :f64
         @test load_settings!(Settings(), Dict("open_faces" => true)).open_faces === true
         @test load_settings!(Settings(), Dict("axis" => [1, 2, 3])).axis === (1.0, 2.0, 3.0)
+
+        # A list field takes a list, and takes a single value as a list of one:
+        # a setting that grew a second element should not invalidate the files
+        # written before it could.
+        @test load_settings!(Settings(), Dict("refine" => [3.0, 1.5])).refine == [3.0, 1.5]
+        @test load_settings!(Settings(), Dict("refine" => 3.0)).refine == [3.0]
+        @test load_settings!(Settings(), Dict("refine" => 3)).refine == [3.0]
+        @test load_settings!(Settings(), Dict("refine" => [])).refine == Float64[]
 
         # A number that is not the integer it claims to be is refused rather
         # than rounded: 40.5 nodes per diameter is a mistake, not a request.

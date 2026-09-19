@@ -69,7 +69,11 @@ Base.@kwdef mutable struct PitchConfig
     overview::Bool = false
     overview_stride::Int = 4
     smoke::Bool = false
-    refine::Float64 = 0.0         # fine-patch edge in diameters; 0 = uniform grid
+    # Patch edges in diameters, coarsest first: `[3.0]` is one level of
+    # refinement, `[3.0, 1.5]` is two. Empty is a uniform grid. A single number
+    # in a settings file still means one level, so files written before the
+    # second level existed still say what they said.
+    refine::Vector{Float64} = Float64[]
     # Open streamwise faces (§4.4.2.1). Without them the box is periodic and
     # the ball flies through its own wake, which V&V-2 measured as the largest
     # error in the whole configuration — the stream arriving at the ball was a
@@ -140,9 +144,11 @@ function parse_args(args)
               --distance D         release to plate, m (default $(round(c.distance, digits=3)))
               --spinup N           sub-cycles before the trajectory is released
               --spinup-flowthroughs F  instead, in box flow-through times (default $(c.spinup_flowthroughs))
-              --refine F           refine a box of F diameters around the ball to 2x
-                                   (§6.5.1 — the only way to get a seam worth the
-                                   name in an eight-diameter domain; at least 3)
+              --refine F[,G...]    refine a box of F diameters around the ball to 2x,
+                                   and a box of G diameters inside that to 4x, and
+                                   so on (§6.5.1 — the only way to get a seam worth
+                                   the name in an eight-diameter domain). The first
+                                   should be at least 3, each later one smaller
               --smagorinsky C      subgrid constant, 0 to rely on the operator's own
                                    dissipation (default $(c.smagorinsky))
               --cpu                force the host path even if a GPU is present
@@ -182,7 +188,7 @@ function parse_args(args)
         elseif a == "--distance";   c.distance = parse(Float64, take())
         elseif a == "--spinup";     c.spinup = parse(Int, take())
         elseif a == "--spinup-flowthroughs"; c.spinup_flowthroughs = parse(Float64, take())
-        elseif a == "--refine";     c.refine = parse(Float64, take())
+        elseif a == "--refine";     c.refine = parse.(Float64, split(take(), ','))
         elseif a == "--smagorinsky"; c.smagorinsky = parse(Float64, take())
         elseif a == "--cpu";        c.device = false
         elseif a == "--out";        c.out = take()
@@ -220,12 +226,12 @@ function plan(c::PitchConfig)
     if c.open_faces
         @printf("Grid        %d x %d x %d = %.1f M nodes, %.2f GiB (%s)%s\n",
                 edge_x, edge, edge, nodes / 1e6, gib, T,
-                c.refine > 0 ? ", coarse level" : "")
+                !isempty(c.refine) ? ", coarse level" : "")
         @printf("Faces       inlet and outlet: %.1f D of run-up, %.1f D of wake\n",
                 c.upstream, c.downstream)
     else
         @printf("Grid        %d³ = %.1f M nodes, %.2f GiB (%s)%s\n",
-                edge, nodes / 1e6, gib, T, c.refine > 0 ? ", coarse level" : "")
+                edge, nodes / 1e6, gib, T, !isempty(c.refine) ? ", coarse level" : "")
         println("Faces       periodic — the ball flies through its own wake (§4.4.2.1); " *
                 "--open changes that")
     end
@@ -237,23 +243,25 @@ function plan(c::PitchConfig)
             @sprintf("Smagorinsky C_s = %.2f", c.smagorinsky) :
             "none — the collision operator's own dissipation only")
     @printf("Blockage    sphere radius is %.3f of the box edge\n", budget.blockage)
+    # Each patch is another array on the device, not a view of the one above,
+    # so it is the sum that has to fit. Checking the base level alone passed
+    # configurations that then ran out of memory partway through setup, which is
+    # the same wasted run as no check at all.
     gib_fine = 0.0
-    if c.refine > 0
-        fine_budget = grid_budget(; nodes_per_diameter = 2 * c.resolution,
-                                  domain_diameters = c.refine)
-        # The fine patch is a second array on the device, not a view of the
-        # first, so it is the sum that has to fit. Checking the coarse level
-        # alone passed configurations that then ran out of memory partway
-        # through setup, which is the same wasted run as no check at all.
-        gib_fine = (4 * round(Int, c.refine * c.resolution / 2) + 1)^3 *
-                   (27 * sizeof(T) + 8) / 2^30
-        @printf("Refined     %.1f D patch at %d/D: %d³ fine nodes, %.3f mm, seam %.2f cells\n",
-                c.refine, 2 * c.resolution, fine_budget.edge,
-                fine_budget.dx_mm, fine_budget.seam_cells)
-        @printf("            %.2f GiB for the patch on top of the coarse level\n",
-                gib_fine)
-        budget = fine_budget      # the warning below should judge what resolves the ball
+    for (k, P) in enumerate(c.refine)
+        res = c.resolution * 2^k                     # this level's nodes per diameter
+        parent_res = c.resolution * 2^(k - 1)
+        side = 4 * round(Int, P * parent_res / 2) + 1
+        gib_k = side^3 * (27 * sizeof(T) + 8) / 2^30
+        gib_fine += gib_k
+        budget = grid_budget(; nodes_per_diameter = res, domain_diameters = P)
+        @printf("Refined     level %d: %.2f D patch at %d/D, %d³ nodes, %.3f mm, seam %.2f cells, %.2f GiB\n",
+                k, P, res, side, budget.dx_mm, budget.seam_cells, gib_k)
     end
+    # The warning below should judge whatever resolves the ball, which is the
+    # deepest level when there is one.
+    isempty(c.refine) ||
+        @printf("            %.2f GiB for the patches on top of the base level\n", gib_fine)
     if budget.seam_cells < 0.2 || budget.boundary_layer_cells < 0.2
         println("\n*** The seam and the boundary layer are far below one cell here, so the")
         println("*** coefficients this produces are a test of the plumbing, not of the")
@@ -333,26 +341,38 @@ function main(args)
     spin_lat = lattice_spin(units, ball)
 
     local wall, flow, state_arg
-    clo = (1, 1, 1)                      # the patch's corner, in coarse indices
-    if c.refine > 0
-        # The patch goes where the ball is, which with open faces is not the
-        # middle of the grid: `RotatingWall` centres the ball in the patch, so a
-        # patch centred on the box would quietly move the ball there and the
-        # run-up would not be the one asked for.
-        half = round(Int, c.refine * c.resolution / 2)
+    if !isempty(c.refine)
+        # **The first patch goes where the ball is**, which with open faces is
+        # not the middle of the grid: `RotatingWall` centres the ball in the
+        # deepest patch, so a patch centred on the box would quietly move the
+        # ball there and the run-up would not be the one asked for. Every patch
+        # after the first is centred in its parent, where the ball then is.
+        patches = Tuple{NTuple{3,Int},NTuple{3,Int}}[]
         mid = round.(Int, centre3)
-        clo = ntuple(d -> mid[d] - half, 3)
-        chi = ntuple(d -> mid[d] + half, 3)
-        if c.open_faces
-            depth = OpenChannel{T}().depth
-            (clo[1] > depth + 1 && chi[1] < dims[1] - depth) ||
-                error("the refined patch reaches a face buffer: raise --upstream/" *
-                      "--downstream or lower --refine")
+        parent_dims = dims
+        for (k, P) in enumerate(c.refine)
+            parent_res = c.resolution * 2^(k - 1)
+            half = round(Int, P * parent_res / 2)
+            lo = ntuple(d -> mid[d] - half, 3)
+            hi = ntuple(d -> mid[d] + half, 3)
+            all(lo .>= 2) && all(hi .<= parent_dims .- 1) ||
+                error("refinement level $k ($(P) D) does not fit inside the level " *
+                      "above it ($(parent_dims)): lower --refine's $(k)th entry")
+            if k == 1 && c.open_faces
+                depth = OpenChannel{T}().depth
+                (lo[1] > depth + 1 && hi[1] < dims[1] - depth) ||
+                    error("the refined patch reaches a face buffer: raise --upstream/" *
+                          "--downstream or lower --refine")
+            end
+            push!(patches, (lo, hi))
+            parent_dims = ntuple(d -> 2 * (hi[d] - lo[d]) + 1, 3)
+            mid = (parent_dims .+ 1) .÷ 2
         end
-        grid = TwoGrid(T, dims, clo, chi, units.τ)
-        wall = RotatingWall(geom, size(grid.fine)[1:3], units.dx / 2)
-        flow = RefinedFlow(grid, wall)
-        state_arg = grid
+        chain = GridChain(T, dims, patches, units.τ)
+        wall = RotatingWall(geom, size(finest_grid(chain))[1:3],
+                            units.dx / 2^length(patches))
+        flow = ChainFlow(chain, wall)
+        state_arg = chain
     else
         wall = RotatingWall(geom, dims, units.dx; center = centre3)
         flow = wall
@@ -380,7 +400,7 @@ function main(args)
     # asked directly. On the refined one the wall lives in the patch and the
     # faces belong to the coarse level, which is what the patch check above
     # covers instead.
-    if channel !== nothing && c.refine == 0 && !open_is_clear(flow_wall(wall), channel)
+    if channel !== nothing && isempty(c.refine) && !open_is_clear(flow_wall(wall), channel)
         error("the ball reaches into a face buffer — raise --upstream or --downstream")
     end
     nsub = min(max_substeps(flow, spin_lat, c.recut_drift), 100)
@@ -401,15 +421,16 @@ function main(args)
     # The free stream in the frame is -V, uniform, at rest density.
     u0 = lattice_freestream(units, ball)
     local g
-    if c.refine > 0
-        init_refined_flow!(flow, (x, y, z) -> (1.0, u0[1], u0[2], u0[3]))
+    if !isempty(c.refine)
+        init_chain_flow!(flow, (x, y, z) -> (1.0, u0[1], u0[2], u0[3]))
+        depth = length(c.refine) + 1
         if c.device
-            flow = gpu_refined_flow(flow)
-            g = flow.grid
-            println("Backend     CUDA, two-level refinement, ", CUDA.name(CUDA.device()))
+            flow = gpu_chain_flow(flow)
+            g = flow.chain
+            println("Backend     CUDA, $depth levels, ", CUDA.name(CUDA.device()))
         else
             g = state_arg
-            println("Backend     host, two-level refinement")
+            println("Backend     host, $depth levels")
         end
     else
         lbm = LBMState{T}(dims..., units.τ; lattice = D3Q27())
@@ -484,11 +505,17 @@ function main(args)
         # ball — lies inside the patch by construction, since the patch has to
         # be at least three diameters for the restriction to have room (§6.5.1).
         # The coarse level outside it is the free stream doing very little.
-        level = c.refine > 0 ? g.fine : g
-        spacing = c.refine > 0 ? units.dx / 2 : units.dx
-        origin = c.refine > 0 ? T.((clo .- 1) .* units.dx) : (zero(T), zero(T), zero(T))
-        ctr = c.refine > 0 ? (size(g.fine)[1:3] .+ 1) ./ 2 : centre3
-        crop = c.snapshot_crop * c.resolution * (c.refine > 0 ? 2 : 1)
+        deep = isempty(c.refine)
+        level = deep ? g : finest_grid(g)
+        # The deepest level's place in the world, from the chain rather than
+        # from arithmetic repeated here: its origin is in base index units, so
+        # a node's position is `(origin - 1 + (i - 1) h) dx`.
+        base_origin, h = deep ? ((one(T), one(T), one(T)), one(T)) :
+                                level_origin(g, length(g))
+        spacing = units.dx * h
+        origin = T.((base_origin .- 1) .* units.dx)
+        ctr = deep ? centre3 : (size(level)[1:3] .+ 1) ./ 2
+        crop = c.snapshot_crop * c.resolution / h
 
         name = @sprintf("flow-%05d.vtk", tag)
         path = joinpath(c.snapshot_dir, name)
@@ -520,14 +547,24 @@ function main(args)
         println("Overview    (the solver's grid, and the one written — `overview_stride` " *
                 "thins the second)")
         written = String[]
-        levels = c.refine > 0 ?
-            [("coarse", g.coarse, flow_coarse_solid(flow), units.dx,
-              (zero(T), zero(T), zero(T))),
-             ("fine", g.fine, solid_mask_of(flow), units.dx / 2,
-              T.((clo .- 1) .* units.dx))] :
-            [("domain", g, solid_mask_of(flow), units.dx,
-              (zero(T), zero(T), zero(T)))]
-        for (name, level, mask, spacing, origin) in levels
+        # Every level, not just the two the first version of this knew about:
+        # the point of the picture is where each patch sits inside the one above.
+        levels_to_write = if isempty(c.refine)
+            [("domain", g, solid_mask_of(flow), units.dx, (zero(T), zero(T), zero(T)))]
+        else
+            out = Tuple[]
+            for k in 1:length(g)
+                a = levels(g)[k]
+                o, h = level_origin(g, k)
+                mask = k == 1 ? flow_coarse_solid(flow) :
+                       k == length(g) ? solid_mask_of(flow) :
+                       falses(size(a)[1:3])
+                name = k == 1 ? "base" : k == length(g) ? "deepest" : "level$k"
+                push!(out, (name, a, mask, units.dx * h, T.((o .- 1) .* units.dx)))
+            end
+            out
+        end
+        for (name, level, mask, spacing, origin) in levels_to_write
             path = joinpath(c.snapshot_dir, "overview-$name.vtk")
             # **What is thinned is the grid, not just the amount of data.** The
             # file is an ImageData whose spacing is `stride` times the solver's,

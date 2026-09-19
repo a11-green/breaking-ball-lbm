@@ -33,6 +33,13 @@ function coerce_setting(name::Symbol, current, v)
         current isa AbstractFloat && return typeof(current)(v)
         current isa Symbol && return Symbol(v)
         current isa AbstractString && return String(v)
+        if current isa Vector{<:Real}
+            # A single number where a list is expected is a list of one, which
+            # keeps `refine = 3.0` meaning what it did before `refine` could
+            # name several levels.
+            E = eltype(current)
+            return v isa AbstractVector ? E[E(x) for x in v] : E[E(v)]
+        end
         if current isa NTuple{3,<:Real}
             length(v) == 3 ||
                 throw(ArgumentError("`$name` needs three numbers, got $(length(v))"))
@@ -81,6 +88,7 @@ toml_value(v::Symbol) = "\"" * string(v) * "\""
 toml_value(v::AbstractString) =
     "\"" * replace(String(v), "\\" => "\\\\", "\"" => "\\\"") * "\""
 toml_value(v::NTuple{3,<:Real}) = "[" * join(v, ", ") * "]"
+toml_value(v::AbstractVector{<:Real}) = "[" * join(v, ", ") * "]"
 
 """
     settings_toml(obj; width = 20)
