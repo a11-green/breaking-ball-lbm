@@ -136,9 +136,16 @@
         @test sign(open_st.force[1]) == sign(closed_st.force[1])
         @test open_st.ball.t ≈ closed_st.ball.t
 
-        # And the residual says it does not apply rather than reporting a
-        # balance that is not being maintained.
-        @test isnan(couple_residual(open_run, open_st, wall_o))
+        # And the residual reports the quantity that exists in each case. With
+        # open faces the controller's balance is not one of them, so what comes
+        # back is the free stream's drift from what the inlet states — finite,
+        # small, and not a momentum balance (`couple_residual`).
+        drift = couple_residual(open_run, open_st, wall_o)
+        @test isfinite(drift)
+        @test 0 <= drift < 0.5
+        target = BBL.lattice_freestream(open_run.units, open_st.ball)
+        @test drift ≈ sqrt(sum(abs2, open_st.mean_velocity .- target)) /
+                      sqrt(sum(abs2, target))
         @test isfinite(couple_residual(closed_run, closed_st, wall_o))
 
         # (The refined path's refusal is checked where its fixtures live, in

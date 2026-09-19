@@ -343,12 +343,17 @@ end
 """
     couple_residual(run, state, flow)
 
-How far the loop is from closing on itself, as a dimensionless number.
+How far the loop is from closing on itself, as a dimensionless number. Which
+balance that is depends on the faces, and the two are not comparable with each
+other — see the open-faces branch below.
 
-At a quasi-steady state the momentum the controller pumps into the fluid every
-step, `a_control × (fluid node count) × ρ`, has to equal the momentum the
-surface takes out, which is the momentum-exchange force — two quantities
-computed by completely different routes.
+**Periodic faces.** At a quasi-steady state the momentum the controller pumps
+into the fluid every step, `a_control × (fluid node count) × ρ`, has to equal
+the momentum the surface takes out, which is the momentum-exchange force — two
+quantities computed by completely different routes.
+
+**Open faces.** The relative gap between the free stream the inlet states and
+the one the box has. A drift check, not a momentum balance.
 
 The frame's own body force does not enter. It accelerates the free stream at
 exactly the rate the target is moving, by the identity in `frame.jl`, so it
@@ -358,13 +363,30 @@ the boundary condition and the unit conversions all agree. It is not expected to
 vanish while the flow is still developing.
 """
 function couple_residual(run::PitchRun{T}, st::PitchState{T}, flow) where {T}
-    # With open faces the balance this checks does not exist: the controller
-    # supplies nothing and the momentum leaves through the outlet. Restoring an
-    # equivalent means measuring the momentum flux through the two faces and
-    # comparing that with the surface force — a real check, and a different one,
-    # which is not written yet. A NaN says so rather than a ratio of one saying
-    # nothing.
-    run.channel === nothing || return T(NaN)
+    # **With open faces this is a different quantity, and it has to be one.**
+    # The balance above does not exist here: the controller supplies nothing and
+    # the momentum leaves through the outlet. The first version returned NaN and
+    # said so, which is honest and useless — a production run then has no
+    # health number at all, for hours, and notices a sick flow only when it
+    # diverges.
+    #
+    # What is cheap and real is the free stream. The inlet states it exactly;
+    # the box mean is measured every sub-cycle anyway for the Mach check. In a
+    # box that is mostly free stream those two agree to a fraction of a percent,
+    # and they stop agreeing for every reason worth catching early: mass
+    # piling up because the outlet is reflecting, the wake reaching a face,
+    # the flow blowing up before any value is non-finite.
+    #
+    # It is *not* a momentum balance and must not be read as one. It cannot
+    # check the surface force against anything, so a unit-conversion error in
+    # the force would pass it. The real replacement is the momentum flux
+    # through the two face planes against the drag, which needs a plane
+    # reduction on both backends and is not written (§11).
+    if run.channel !== nothing
+        target = lattice_freestream(run.units, st.ball)
+        scale = max(sqrt(sum(abs2, target)), eps(T))
+        return sqrt(sum(abs2, st.mean_velocity .- target)) / scale
+    end
     supplied = st.control .* flow_fluid_count(flow)      # lattice force, ρ = 1
     removed = to_lattice_force(run.units, st.force)
     scale = max(sqrt(sum(abs2, removed)), eps(T))

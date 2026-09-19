@@ -502,7 +502,11 @@ function main(args)
     flush(stdout)
     t0 = time()
     res = spin_up!(g, run, st, flow; cycles = spinup)
-    @printf("done in %.0f s, momentum residual %.3f\n", time() - t0, res)
+    # The two configurations check different things and the number means
+    # different things, so it is named rather than left to be misread as one
+    # quantity that changed value (`couple_residual`).
+    @printf("done in %.0f s, %s %.4f\n", time() - t0,
+            c.open_faces ? "free-stream drift" : "momentum residual", res)
 
     rows = NamedTuple[]
     t1 = time()
@@ -688,16 +692,17 @@ function main(args)
                      um_lat_x = s.mean_velocity[1], um_lat_y = s.mean_velocity[2],
                      um_lat_z = s.mean_velocity[3],
                      rpm = spin_rpm(s.ball), steps = s.steps, fresh = s.fresh,
-                     recuts = flow_recuts(flow)))
+                     recuts = flow_recuts(flow),
+                     residual = couple_residual(run, s, flow)))
 
         if c.snapshot > 0 && cycles % c.snapshot == 0
             snapshot!(s, cycles)
         end
 
         if cycles % c.report_every == 0 || s.ball.x[1] >= c.distance
-            @printf("%-9.4f %-8.3f %-8.4f %-8.4f %-8.2f %-7.3f %-7.3f %-7.3f %-6d %-8.3f\n",
+            @printf("%-9.4f %-8.3f %-8.4f %-8.4f %-8.2f %-7.3f %-7.3f %-7.3f %-6d %-8.4f\n",
                     s.ball.t, s.ball.x[1], s.ball.x[2], s.ball.x[3], speed(s.ball),
-                    CD, CL, Cs, flow_recuts(flow), couple_residual(run, s, flow))
+                    CD, CL, Cs, rows[end].recuts, rows[end].residual)
             flush(stdout)
         end
 
@@ -729,7 +734,7 @@ function main(args)
 
     @printf("%-9s %-8s %-8s %-8s %-8s %-7s %-7s %-7s %-6s %-8s\n",
             "t (s)", "x (m)", "y (m)", "z (m)", "|V|", "C_D", "C_L", "C_side", "cuts",
-            "residual")
+            c.open_faces ? "drift" : "residual")
     fly!(g, run, st, flow; cycles = c.max_cycles, callback = sample!)
     wall_time = time() - t1
 
