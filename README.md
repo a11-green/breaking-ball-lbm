@@ -135,3 +135,26 @@ julia --project=. scripts/run_pitch.jl --help                # 実行時の一�
 実行するたびに、解決済みの全設定が起動ログとTOMLとして `<out>-config.toml` に書き出される。ログをそのまま `--config` に渡せば同じ実行を再現できるので、**結果のログをそのまま渡すだけで実行条件も一緒に伝わる**。
 
 `release`（リリース位置）・`recut_drift`（再カットの閾値）・`operator`（衝突演算子）・`rule`（バウンスバック規則）・`report_every`（stdout出力の間隔）・`max_cycles`（安全装置としての上限サブサイクル数）はコマンドラインからは変更できず、`--config` のTOMLファイルでのみ指定できる。
+
+## `scripts/analyze_pitch.jl` — 結果の可視化・分析
+
+`run_pitch.jl` が書いた軌跡CSVを読み、位置・流入条件・速度・スピン・力係数・ソルバの健全性（残差・再カット数）をまとめて図にする（§7.4、段階2）。CSVの列は姿勢クォータニオン（`qw,qx,qy,qz`）とスピン（`wx,wy,wz`）を持つので、3D軌道パネルには**そのCFD計算が実際に持っていた向きの縫い目**を、任意の時刻にスクラブして表示できる（`view_pitch.jl` の解析モデル版と同じ仕組み）。
+
+```bash
+julia --project=. scripts/analyze_pitch.jl pitch.csv
+julia --project=. scripts/analyze_pitch.jl pitch.csv --backend cairomakie --record report.png
+julia --project=. scripts/analyze_pitch.jl pitch.csv --smooth 41
+julia --project=. scripts/analyze_pitch.jl --help
+```
+
+Makieのインストールは `view_pitch.jl` と同様（デフォルト環境に `GLMakie`/`WGLMakie`/`CairoMakie` のいずれかを入れる）。
+
+| オプション | 既定値 | 意味 |
+|---|---|---|
+| `CSV`（位置引数）/ `--csv FILE` | pitch.csv | 読み込む軌跡CSV |
+| `--smooth N` | 行数から自動選択 | 力係数パネルの移動平均の窓幅（サブサイクル数）。瞬時の運動量交換力は乱流のゆらぎで大きく振れるため、生の系列を薄く重ねた上に移動平均を太線で描く |
+| `--seam-samples N` | 200 | 3Dパネルで縫い目曲線を描く点数 |
+| `--ball-scale S` | 15.0 | 3Dパネルでのボールの拡大率 |
+| `--backend` / `--web` / `--record` | `view_pitch.jl` と同じ | 描画バックエンドと出力先 |
+
+読み込みは列名ベースで、必要な列（`t,x,y,z,speed,CD,CL,Cside,rpm,u_in_*,q*,w*,recuts,residual`）が無いCSVは、どの列が足りないかを明示するエラーで止まる——列が増減しても、足りない列だけを名指しできるようにするための設計（`src/postprocess/pitch_csv.jl`、`read_pitch_csv`/`require_columns`）。

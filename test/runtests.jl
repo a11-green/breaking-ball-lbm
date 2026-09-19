@@ -23,6 +23,7 @@ const BBL = BreakingBallLBM
     include("test_vtk.jl")
     include("test_config.jl")
     include("test_pitch_view.jl")
+    include("test_pitch_csv.jl")
     include("test_trajectory.jl")
     include("test_coupling.jl")
 end
