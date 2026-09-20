@@ -63,6 +63,9 @@ const REQUIRED_COLUMNS = (:t, :x, :y, :z, :speed, :CD, :CL, :Cside, :rpm,
                           :u_in_x, :u_in_y, :u_in_z, :qw, :qx, :qy, :qz,
                           :wx, :wy, :wz, :recuts, :residual)
 
+# 1 mph = 0.44704 m/s exactly, by definition — not an approximation.
+const MPH_PER_MPS = 1 / 0.44704
+
 function parse_args(args)
     c = AnalyzeConfig()
     positional_taken = false
@@ -265,9 +268,11 @@ function main(c::AnalyzeConfig)
     scatter!(axc, lift(i -> Point2f(data[:y][i], data[:z][i]), frame);
              color = :crimson, markersize = 14)
 
-    # --- side view ---
+    # --- side view: true scale, rubber to plate, ground up — a real-world
+    #     reference frame rather than one autoscaled to whatever this run's
+    #     own --distance happened to be ---
     axs = Axis(fig[1, 3]; title = "from the side", xlabel = "toward the plate (m)",
-              ylabel = "up (m)")
+              ylabel = "up (m)", aspect = DataAspect())
     lines!(axs, data[:x], data[:z]; color = :crimson, linewidth = 2)
     for (k, cmp) in enumerate(compares)
         lines!(axs, cmp.data[:x], cmp.data[:z];
@@ -277,6 +282,8 @@ function main(c::AnalyzeConfig)
                                     color = (:gray30, 0.8), linewidth = 2, linestyle = :dot)
     scatter!(axs, lift(i -> Point2f(data[:x][i], data[:z][i]), frame);
               color = :crimson, markersize = 12)
+    xlims!(axs, 0, PLATE_DISTANCE)
+    ylims!(axs, 0, nothing)
 
     # --- inflow velocity: u_in_x dwarfs u_in_y/u_in_z, so they get their own
     #     independently-scaled axis rather than being flattened by the shared one ---
@@ -293,20 +300,22 @@ function main(c::AnalyzeConfig)
     axislegend(axin2, [l_iny, l_inz], ["u_in_y", "u_in_z"]; position = :rb,
               framevisible = false, fontsize = 10)
 
-    # --- speed and spin: raw values on their own axes, not a decay ratio ---
-    axsp = Axis(fig[2, 3]; title = "speed and spin", xlabel = "t (s)", ylabel = "|V| (m/s)")
-    l_v = lines!(axsp, t, data[:speed]; color = :steelblue)
+    # --- speed and spin: raw values on their own axes, not a decay ratio.
+    #     Speed in mph on the graph (§ballpark convention); the console
+    #     summary above stays in m/s, the solver's own unit. ---
+    axsp = Axis(fig[2, 3]; title = "speed and spin", xlabel = "t (s)", ylabel = "|V| (mph)")
+    l_v = lines!(axsp, t, data[:speed] .* MPH_PER_MPS; color = :steelblue)
     axsp2 = Axis(fig[2, 3]; ylabel = "spin (rpm)", yaxisposition = :right, ygridvisible = false)
     hidespines!(axsp2); hidexdecorations!(axsp2)
     l_rpm = lines!(axsp2, t, data[:rpm]; color = :firebrick)
     for (k, cmp) in enumerate(compares)
         col = cmp_colors[mod1(k, length(cmp_colors))]
-        lines!(axsp, cmp.t, cmp.data[:speed]; color = col, linestyle = :dash)
+        lines!(axsp, cmp.t, cmp.data[:speed] .* MPH_PER_MPS; color = col, linestyle = :dash)
         lines!(axsp2, cmp.t, cmp.data[:rpm]; color = (col, 0.6), linestyle = :dash)
     end
     vlines!(axsp, lift(i -> t[i], frame); color = (:black, 0.3))
-    sp_text = lift(i -> @sprintf("|V| = %.2f m/s   spin = %.0f rpm", data[:speed][i], data[:rpm][i]),
-                   frame)
+    sp_text = lift(i -> @sprintf("|V| = %.1f mph   spin = %.0f rpm",
+                                 data[:speed][i] * MPH_PER_MPS, data[:rpm][i]), frame)
     text!(axsp, 0.02, 0.98; text = sp_text, space = :relative,
           align = (:left, :top), fontsize = 13)
     axislegend(axsp, [l_v], ["|V|"]; position = :lt, framevisible = false, fontsize = 10)
@@ -392,17 +401,27 @@ function main(c::AnalyzeConfig)
         set_close_to!(el_slider, MLB_ELEVATION_DEG)
     end
 
+    # A plain `while events(fig).window_open[] ... end` looked right but, on
+    # whatever Makie version actually ran this, threw on its very first check
+    # and — being wrapped in a try/catch that rethrows — silently killed the
+    # task before the loop body (the part that advances the frame) ever ran
+    # once: the slider still worked (it's driven by its own `on`, unrelated
+    # to this task) but Play did nothing. Checking the window per iteration,
+    # with a fallback that keeps playing if the check itself is unreliable,
+    # means a bad check can no longer stop playback from working at all.
     @async begin
-        try
-            while events(fig.scene).window_open[]
-                if playing[]
-                    nxt = slider.value[] < n ? slider.value[] + 1 : 1
-                    set_close_to!(slider, nxt)
-                end
-                sleep(1.0 / max(c.fps, 1.0))
+        while true
+            open = try
+                events(fig).window_open[]
+            catch
+                true
             end
-        catch err
-            err isa InterruptException || rethrow()
+            open || break
+            if playing[]
+                nxt = slider.value[] < n ? slider.value[] + 1 : 1
+                set_close_to!(slider, nxt)
+            end
+            sleep(1.0 / max(c.fps, 1.0))
         end
     end
 
