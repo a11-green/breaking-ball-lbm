@@ -146,6 +146,8 @@ julia --project=. scripts/run_pitch.jl --help                # 実行時の一�
 julia --project=. scripts/analyze_pitch.jl pitch.csv
 julia --project=. scripts/analyze_pitch.jl pitch.csv --backend cairomakie --record report.png
 julia --project=. scripts/analyze_pitch.jl pitch.csv --smooth 41
+julia --project=. scripts/analyze_pitch.jl pitch.csv --reference "4-seam fastball"
+julia --project=. scripts/analyze_pitch.jl pitch.csv --compare other_pitch.csv
 julia --project=. scripts/analyze_pitch.jl --help
 ```
 
@@ -156,7 +158,13 @@ Makieのインストールは `view_pitch.jl` と同様（デフォルト環境�
 | `CSV`（位置引数）/ `--csv FILE` | pitch.csv | 読み込む軌跡CSV |
 | `--smooth N` | 行数から自動選択 | 力係数パネルの移動平均の窓幅（サブサイクル数）。瞬時の運動量交換力は乱流のゆらぎで大きく振れるため、生の系列を薄く重ねた上に移動平均を太線で描く |
 | `--seam-samples N` | 200 | 3Dパネルで縫い目曲線を描く点数 |
-| `--ball-scale S` | 15.0 | 3Dパネルでのボールの拡大率 |
+| `--ball-scale S` | 15.0 | 3Dパネルでのボールの拡大率（起動時の初期値。表示中も "ball ×" スライダーで変更できる） |
+| `--compare FILE` | なし（繰り返し指定可） | 別の実行の軌跡CSVを重ね描きする（自分で計算した別の球種・別解像度との比較用） |
+| `--reference NAME` | なし | `view_pitch.jl` の解析モデル（`PITCH_TYPES`）から汎用的な参考球種を重ね描きする。名前は `4-seam fastball`, `2-seam / sinker`, `sweeper`, `gyroball`, `12-6 curve`。**特定の投手の実測値ではなく典型的なパラメータ**（大谷投手個人のフォーシームの実測値をBaseball Savantで確認できていないため。§11参照） |
+| `--reference-speed V` / `--reference-rpm R` | 参考球種自身の値 | `--reference` の球速・回転数を上書き |
+| `--fps N` | 30.0 | 自動再生のフレームレート |
 | `--backend` / `--web` / `--record` | `view_pitch.jl` と同じ | 描画バックエンドと出力先 |
 
 読み込みは列名ベースで、必要な列（`t,x,y,z,speed,CD,CL,Cside,rpm,u_in_*,q*,w*,recuts,residual`）が無いCSVは、どの列が足りないかを明示するエラーで止まる——列が増減しても、足りない列だけを名指しできるようにするための設計（`src/postprocess/pitch_csv.jl`、`read_pitch_csv`/`require_columns`）。
+
+**表示中の操作**（`--record` を使わない場合）: スクラブ用スライダーのほか、Reset/Play で自動再生、方位角(azimuth)・仰角(elevation)スライダーで3Dカメラを向ける、「MLB view」ボタンで放送中継風のアングル（投手の背後から本塁方向、やや見下ろし）に飛ぶ——ただしこのボタンの角度は未検証（このサンドボックスにMakieを入れられずGUIで確認できていない）ので、実際の中継映像と見比べてスライダーで追い込み、ちょうどいい値を教えてもらえれば既定値として焼き込む。
