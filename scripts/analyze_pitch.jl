@@ -283,7 +283,7 @@ function main(c::AnalyzeConfig)
     scatter!(axs, lift(i -> Point2f(data[:x][i], data[:z][i]), frame);
               color = :crimson, markersize = 12)
     xlims!(axs, 0, PLATE_DISTANCE)
-    ylims!(axs, 0, nothing)
+    ylims!(axs, 0, 2)
 
     # --- inflow velocity: u_in_x dwarfs u_in_y/u_in_z, so they get their own
     #     independently-scaled axis rather than being flattened by the shared one ---
@@ -401,27 +401,25 @@ function main(c::AnalyzeConfig)
         set_close_to!(el_slider, MLB_ELEVATION_DEG)
     end
 
-    # A plain `while events(fig).window_open[] ... end` looked right but, on
-    # whatever Makie version actually ran this, threw on its very first check
-    # and — being wrapped in a try/catch that rethrows — silently killed the
-    # task before the loop body (the part that advances the frame) ever ran
-    # once: the slider still worked (it's driven by its own `on`, unrelated
-    # to this task) but Play did nothing. Checking the window per iteration,
-    # with a fallback that keeps playing if the check itself is unreliable,
-    # means a bad check can no longer stop playback from working at all.
-    @async begin
-        while true
-            open = try
-                events(fig).window_open[]
-            catch
-                true
-            end
-            open || break
-            if playing[]
-                nxt = slider.value[] < n ? slider.value[] + 1 : 1
-                set_close_to!(slider, nxt)
-            end
-            sleep(1.0 / max(c.fps, 1.0))
+    # Two separate `@async` + `sleep` polling loops did nothing when actually
+    # run (only the slider's own drag-driven `on` ever moved the frame), most
+    # likely because something in that loop threw and — running detached,
+    # with nothing ever `fetch`ing it — the exception had nowhere to surface:
+    # a `Task` failing silently is exactly "looks like it does nothing."
+    # Driving playback off Makie's own render tick instead of a hand-rolled
+    # task avoids the whole class of problem: it runs as an ordinary
+    # Observable callback in the same place the slider's callback already
+    # runs successfully, once per rendered frame, with no separate task or
+    # sleep loop to go quietly wrong.
+    play_accum = Ref(0.0)
+    on(events(fig).tick) do tick
+        playing[] || return
+        play_accum[] += tick.delta_time
+        step = 1.0 / max(c.fps, 1.0)
+        while play_accum[] >= step
+            play_accum[] -= step
+            nxt = slider.value[] < n ? slider.value[] + 1 : 1
+            set_close_to!(slider, nxt)
         end
     end
 
