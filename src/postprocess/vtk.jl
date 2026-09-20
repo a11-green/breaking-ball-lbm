@@ -227,3 +227,251 @@ function write_polylines(path::AbstractString,
     end
     return path
 end
+
+"""
+    read_polylines(path) -> (lines, ids, title)
+
+The inverse of [`write_polylines`](@ref): read the points, line polylines and
+`line_id` cell scalar back out of a file it wrote. `lines[k]` is a
+`Vector{NTuple{3,Float64}}` and `ids[k]` its `line_id` (as written, `k` itself
+unless a caller asked for something else).
+
+This exists so a later pass can find, say, "the seam" inside a frame someone
+else's run already wrote — without re-running the simulation or re-deriving
+the geometry — by reading its own output back rather than assuming a naming
+convention. [`ball_from_seam`](@ref) is the reason it was written.
+"""
+function read_polylines(path::AbstractString)
+    data = read(path)
+    pos = Ref(1)
+    textline() = begin
+        e = findnext(==(UInt8('\n')), data, pos[])
+        e === nothing && throw(ArgumentError("$path: truncated header (no more newlines)"))
+        s = String(data[pos[]:(e - 1)])
+        pos[] = e + 1
+        s
+    end
+    getfloats(n) = begin
+        stop = pos[] + 4n - 1
+        stop <= length(data) ||
+            throw(ArgumentError("$path: truncated — expected $(4n) more bytes at byte $(pos[])"))
+        v = ntoh.(reinterpret(Float32, data[pos[]:stop]))
+        pos[] += 4n
+        v
+    end
+    header = textline()
+    header == "# vtk DataFile Version 3.0" ||
+        throw(ArgumentError("$path: not a legacy VTK file (got \"$header\")"))
+    title = textline()
+    textline() == "BINARY" || throw(ArgumentError("$path: not written as BINARY"))
+    textline() == "DATASET POLYDATA" ||
+        throw(ArgumentError("$path: not POLYDATA (read_polylines only reads that)"))
+
+    head = split(textline())
+    (length(head) == 3 && head[1] == "POINTS" && head[3] == "float") ||
+        throw(ArgumentError("$path: expected \"POINTS n float\", got \"$(join(head, ' '))\""))
+    npoints = parse(Int, head[2])
+    coords = ntoh.(reinterpret(Float32, data[pos[]:(pos[] + 12npoints - 1)]))
+    pos[] += 12npoints
+    points = [(Float64(coords[3k-2]), Float64(coords[3k-1]), Float64(coords[3k]))
+              for k in 1:npoints]
+
+    isempty(textline()) || throw(ArgumentError("$path: expected a blank line after POINTS"))
+    head = split(textline())
+    (length(head) == 3 && head[1] == "LINES") ||
+        throw(ArgumentError("$path: expected \"LINES nlines total\", got \"$(join(head, ' '))\""))
+    nlines = parse(Int, head[2])
+
+    read_int32() = begin
+        v = ntoh(reinterpret(Int32, data[pos[]:(pos[] + 3)])[1])
+        pos[] += 4
+        Int(v)
+    end
+    lines = Vector{Vector{NTuple{3,Float64}}}(undef, nlines)
+    for k in 1:nlines
+        len = read_int32()
+        lines[k] = [points[read_int32() + 1] for _ in 1:len]   # written zero-based
+    end
+
+    isempty(textline()) || throw(ArgumentError("$path: expected a blank line after LINES"))
+    head = split(textline())
+    (length(head) == 2 && head[1] == "CELL_DATA" && parse(Int, head[2]) == nlines) ||
+        throw(ArgumentError("$path: expected \"CELL_DATA $nlines\", got \"$(join(head, ' '))\""))
+    startswith(textline(), "SCALARS line_id") ||
+        throw(ArgumentError("$path: expected the line_id SCALARS block"))
+    textline() == "LOOKUP_TABLE default" ||
+        throw(ArgumentError("$path: expected \"LOOKUP_TABLE default\""))
+    ids = Int.(getfloats(nlines))
+
+    return lines, ids, title
+end
+
+"""
+    ball_from_seam(lines, ids)
+
+The ball's centre and radius, read off the seam curve rather than passed in
+separately — so a later pass never has to know what scale or radius an earlier
+one drew the seam at.
+
+`write_polylines` gives the seam `line_id == 1` (the order `run_pitch.jl` calls
+it in: seam first, spin axis second — see [`read_polylines`](@ref)). Every
+point on it lies on the ball's surface by construction (`seam_world` rotates
+and translates a curve that starts on a unit sphere), so the centroid is the
+centre and the mean distance to it is the radius. The mean rather than any one
+point's distance is what makes this insensitive to the single-precision
+round-trip through the file.
+"""
+function ball_from_seam(lines::AbstractVector{<:AbstractVector{<:NTuple{3,<:Real}}},
+                        ids::AbstractVector{<:Integer})
+    k = findfirst(==(1), ids)
+    k === nothing &&
+        throw(ArgumentError("no line has line_id == 1 (the seam) — ids present: $ids"))
+    seam = lines[k]
+    isempty(seam) && throw(ArgumentError("the seam line has no points"))
+    # `seam_polyline` closes the curve by repeating its first point at the end
+    # (so it draws as a loop, not an arc with a gap); left in, that one point
+    # would be counted twice and pull the mean toward it by O(R/n) — small
+    # (a fraction of a millimetre at the usual few hundred samples) but free to
+    # remove, since the repeat is bit-identical after the same transform and
+    # the same Float32 round trip put it there.
+    if length(seam) > 1 && seam[1] == seam[end]
+        seam = @view seam[1:end-1]
+    end
+    n = length(seam)
+    cx = sum(p[1] for p in seam) / n
+    cy = sum(p[2] for p in seam) / n
+    cz = sum(p[3] for p in seam) / n
+    r = sum(sqrt((p[1] - cx)^2 + (p[2] - cy)^2 + (p[3] - cz)^2) for p in seam) / n
+    return (cx, cy, cz), r
+end
+
+"""
+    sphere_mesh(center, radius; slices = 24, stacks = 16) -> (points, triangles)
+
+A UV-sphere as a triangle mesh: `stacks + 1` rings of `slices` points each
+(pole to pole), triangulated with the two polar rings collapsed to a point and
+their would-be degenerate triangles dropped rather than written as zero-area
+ones. `points[i]` is an `(x, y, z)` and `triangles[j]` is `(a, b, c)`,
+one-based indices into `points` — ready for [`write_triangle_mesh`](@ref).
+
+A sphere has no preferred axis, so unlike the seam this needs no orientation:
+the mesh looks the same whichever pole `slices`/`stacks` happen to run through.
+"""
+function sphere_mesh(center::NTuple{3,<:Real}, radius::Real;
+                     slices::Integer = 24, stacks::Integer = 16)
+    slices >= 3 || throw(ArgumentError("slices must be at least 3, got $slices"))
+    stacks >= 2 || throw(ArgumentError("stacks must be at least 2, got $stacks"))
+    radius > 0 || throw(ArgumentError("radius must be positive, got $radius"))
+
+    T = promote_type(Float64, typeof(float(radius)))
+    cx, cy, cz = T.(center)
+    R = T(radius)
+
+    # Ring i (0 at the north pole, stacks at the south pole) holds `slices`
+    # points at co-latitude φ = π i / stacks; ring 0 and ring `stacks` each
+    # collapse to a single physical point, repeated `slices` times so every
+    # ring has the same point count and the index arithmetic below stays
+    # uniform. `idx` wraps `j` so the last slice joins back to the first.
+    idx(i, j) = i * slices + mod(j, slices) + 1
+    points = Vector{NTuple{3,T}}(undef, (stacks + 1) * slices)
+    for i in 0:stacks
+        φ = T(pi) * i / stacks
+        sφ, cφ = sincos(φ)
+        for j in 0:(slices - 1)
+            θ = 2 * T(pi) * j / slices
+            sθ, cθ = sincos(θ)
+            points[idx(i, j)] = (cx + R * sφ * cθ, cy + R * sφ * sθ, cz + R * cφ)
+        end
+    end
+
+    triangles = Vector{NTuple{3,Int}}()
+    sizehint!(triangles, 2 * slices * (stacks - 1))
+    for i in 0:(stacks - 1), j in 0:(slices - 1)
+        a, b, c, d = idx(i, j), idx(i, j + 1), idx(i + 1, j + 1), idx(i + 1, j)
+        # At i == 0, a and b are both the (repeated) north pole: that triangle
+        # has zero area and is dropped, keeping only the cap triangle (a,c,d).
+        # The mirror image holds at the south pole, i == stacks - 1.
+        i == 0 || push!(triangles, (a, b, c))
+        i == stacks - 1 || push!(triangles, (a, c, d))
+    end
+    return points, triangles
+end
+
+"""
+    write_triangle_mesh(path, points, triangles; title)
+
+Legacy VTK `POLYDATA`, binary, holding a triangle mesh — the same file family
+as [`write_polylines`](@ref), with a `POLYGONS` section instead of `LINES`.
+`triangles` are one-based indices into `points`, written zero-based as the
+format requires.
+"""
+function write_triangle_mesh(path::AbstractString,
+                             points::AbstractVector{<:NTuple{3,<:Real}},
+                             triangles::AbstractVector{<:NTuple{3,<:Integer}};
+                             title::AbstractString = "breaking-ball-lbm")
+    isempty(points) && throw(ArgumentError("no points to write"))
+    isempty(triangles) && throw(ArgumentError("no triangles to write"))
+    n = length(points)
+    for t in triangles
+        all(1 <= i <= n for i in t) ||
+            throw(ArgumentError("triangle $t indexes outside 1:$n"))
+    end
+    put(io, x) = write(io, hton(Float32(x)))
+
+    open(path, "w") do io
+        println(io, "# vtk DataFile Version 3.0")
+        println(io, title)
+        println(io, "BINARY")
+        println(io, "DATASET POLYDATA")
+        println(io, "POINTS $n float")
+        for p in points
+            put(io, p[1]); put(io, p[2]); put(io, p[3])
+        end
+        println(io)
+        println(io, "POLYGONS $(length(triangles)) $(4 * length(triangles))")
+        for (a, b, c) in triangles
+            write(io, hton(Int32(3)))
+            write(io, hton(Int32(a - 1)))
+            write(io, hton(Int32(b - 1)))
+            write(io, hton(Int32(c - 1)))
+        end
+        println(io)
+    end
+    return path
+end
+
+"""
+    write_ball(path, center, radius; slices = 24, stacks = 16, title)
+
+[`sphere_mesh`](@ref) followed by [`write_triangle_mesh`](@ref), for the common
+case of just wanting the file.
+"""
+function write_ball(path::AbstractString, center::NTuple{3,<:Real}, radius::Real;
+                    slices::Integer = 24, stacks::Integer = 16,
+                    title::AbstractString = "breaking-ball-lbm")
+    points, triangles = sphere_mesh(center, radius; slices = slices, stacks = stacks)
+    return write_triangle_mesh(path, points, triangles; title = title)
+end
+
+"""
+    read_vtk_series(path) -> Vector{NamedTuple{(:name, :time),Tuple{String,Float64}}}
+
+Read back the `{"name": ..., "time": ...}` list a `.vtk.series` file holds
+(`scripts/run_pitch.jl` writes one alongside every frame sequence).
+
+Not a general JSON parser — this project's own writer is the only thing that
+produces these files, in exactly this layout, so a few regular expressions
+over the two fields it actually has are what a real parser would amount to
+here anyway, without adding a dependency to read back three lines of a file
+this project wrote in the first place.
+"""
+function read_vtk_series(path::AbstractString)
+    text = read(path, String)
+    names = [String(m.captures[1]) for m in eachmatch(r"\"name\"\s*:\s*\"([^\"]+)\"", text)]
+    times = [parse(Float64, m.captures[1])
+             for m in eachmatch(r"\"time\"\s*:\s*([-0-9.eE+]+)", text)]
+    length(names) == length(times) ||
+        throw(ArgumentError("$path: found $(length(names)) names but $(length(times)) " *
+                            "times — not a series file this reader recognises"))
+    return [(name = n, time = t) for (n, t) in zip(names, times)]
+end

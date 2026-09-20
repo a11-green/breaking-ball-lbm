@@ -199,6 +199,192 @@
                                                        [seam, axis]; names = ["only one"])
     end
 
+    @testset "read_polylines is the inverse of write_polylines" begin
+        geom = BaseballGeometry()
+        q = quat_from_axis_angle((0.3, 1.0, -0.2), 0.7)
+        centre = (0.35, -0.10, 1.80)
+        seam = seam_world(geom, q, centre; samples = 96)
+        axis = [(centre[1], centre[2], centre[3] - 0.05),
+                (centre[1], centre[2], centre[3] + 0.05)]
+
+        path = tempname() * ".vtk"
+        write_polylines(path, [seam, axis]; names = ["seam", "spin axis"],
+                        title = "t = 0.0100 s")
+        lines, ids, title = read_polylines(path)
+
+        @test title == "t = 0.0100 s [seam, spin axis]"
+        @test ids == [1, 2]
+        @test length(lines) == 2
+        @test length(lines[1]) == length(seam)
+        @test length(lines[2]) == 2
+        for (a, b) in zip(lines[1], seam), (x, y) in zip(a, b)
+            @test x ≈ y atol = 1e-5      # single-precision round trip
+        end
+        for (a, b) in zip(lines[2], axis), (x, y) in zip(a, b)
+            @test x ≈ y atol = 1e-5
+        end
+
+        # Files this reader was not asked to read say so, not "0 lines".
+        bad = tempname() * ".vtk"
+        write(bad, "not a vtk file at all\n")
+        @test_throws ArgumentError read_polylines(bad)
+
+        snap_path = tempname() * ".vtk"
+        write_snapshot(snap_path, state(), falses(dims))
+        @test_throws ArgumentError read_polylines(snap_path)   # STRUCTURED_POINTS, not POLYDATA
+    end
+
+    @testset "ball_from_seam recovers the ball a seam was drawn on" begin
+        geom = BaseballGeometry()
+        q = quat_from_axis_angle((0.1, -0.4, 0.9), 1.3)
+        centre = (1.5, -0.02, 1.75)
+        seam = seam_world(geom, q, centre; samples = 200)   # scale = 1: real metres
+        axis = [(centre[1], centre[2], centre[3] - 0.05),
+                (centre[1], centre[2], centre[3] + 0.05)]
+
+        path = tempname() * ".vtk"
+        write_polylines(path, [seam, axis]; names = ["seam", "spin axis"])
+        lines, ids, _ = read_polylines(path)
+        c, r = ball_from_seam(lines, ids)
+
+        for (x, y) in zip(c, centre)
+            @test x ≈ y atol = 1e-5
+        end
+        @test r ≈ geom.radius atol = 1e-5
+
+        # The order `run_pitch.jl` writes in (seam, then axis) is what makes
+        # `line_id == 1` mean "the seam" — a file that never says so is refused
+        # rather than silently measured against the spin axis's two points.
+        @test_throws ArgumentError ball_from_seam(lines, [2, 3])
+    end
+
+    @testset "sphere_mesh is a closed sphere of the right size" begin
+        centre = (1.0, -2.0, 0.5)
+        R = 0.0374
+        pts, tris = sphere_mesh(centre, R; slices = 32, stacks = 24)
+
+        @test length(pts) == 32 * 25          # (stacks + 1) rings of `slices`
+        @test length(tris) == 2 * 32 * 23     # 2·slices·(stacks - 1)
+        for p in pts
+            d = sqrt((p[1] - centre[1])^2 + (p[2] - centre[2])^2 + (p[3] - centre[3])^2)
+            @test d ≈ R atol = 1e-12          # every point is exactly on the sphere
+        end
+        # The two polar rings each collapse to one physical point.
+        north = pts[1:32]
+        @test all(p -> all(isapprox.(p, north[1]; atol = 1e-12)), north)
+        south = pts[(end - 31):end]
+        @test all(p -> all(isapprox.(p, south[1]; atol = 1e-12)), south)
+
+        # Every triangle index is in bounds and non-degenerate.
+        n = length(pts)
+        for (a, b, c) in tris
+            @test 1 <= a <= n && 1 <= b <= n && 1 <= c <= n
+            @test length(Set((a, b, c))) == 3
+        end
+
+        # Total area converges to 4πR² as the mesh refines (a bound that would
+        # not hold if triangles were overlapping or missing).
+        function area(pts, tris)
+            s = 0.0
+            for (a, b, c) in tris
+                pa, pb, pc = pts[a], pts[b], pts[c]
+                u = pb .- pa
+                v = pc .- pa
+                cx = u[2] * v[3] - u[3] * v[2]
+                cy = u[3] * v[1] - u[1] * v[3]
+                cz = u[1] * v[2] - u[2] * v[1]
+                s += 0.5 * sqrt(cx^2 + cy^2 + cz^2)
+            end
+            return s
+        end
+        exact = 4 * pi * R^2
+        coarse = area(sphere_mesh(centre, R; slices = 8, stacks = 6)...)
+        fine = area(pts, tris)
+        @test abs(fine - exact) < abs(coarse - exact)
+        @test fine ≈ exact rtol = 1e-2
+
+        @test_throws ArgumentError sphere_mesh(centre, R; slices = 2)
+        @test_throws ArgumentError sphere_mesh(centre, R; stacks = 1)
+        @test_throws ArgumentError sphere_mesh(centre, -1.0)
+    end
+
+    @testset "write_ball / write_triangle_mesh produce a readable POLYDATA mesh" begin
+        centre = (0.1, 0.2, 0.3)
+        R = 0.5
+        path = tempname() * ".vtk"
+        write_ball(path, centre, R; slices = 12, stacks = 8, title = "a ball")
+
+        data = read(path)
+        pos = 1
+        line() = begin
+            e = findnext(==(UInt8('\n')), data, pos)
+            s = String(data[pos:(e - 1)])
+            pos = e + 1
+            s
+        end
+        @test line() == "# vtk DataFile Version 3.0"
+        @test line() == "a ball"
+        @test line() == "BINARY"
+        @test line() == "DATASET POLYDATA"
+        head = split(line())
+        npoints = parse(Int, head[2])
+        @test npoints == 12 * 9
+        coords = ntoh.(reinterpret(Float32, data[pos:(pos + 12npoints - 1)]))
+        pos += 12npoints
+        for k in 1:npoints
+            p = (coords[3k-2], coords[3k-1], coords[3k])
+            d = sqrt(sum(abs2, p .- Float32.(centre)))
+            @test d ≈ Float32(R) atol = 1e-4
+        end
+        @test line() == ""
+        head = split(line())
+        @test head[1] == "POLYGONS"
+        ntris = parse(Int, head[2])
+        @test parse(Int, head[3]) == 4ntris
+        conn = ntoh.(reinterpret(Int32, data[pos:(pos + 4 * 4ntris - 1)]))
+        for t in 1:ntris
+            @test conn[4t-3] == 3                       # every cell is a triangle
+            @test all(0 .<= conn[(4t-2):4t] .< npoints)  # zero-based, in range
+        end
+
+        @test_throws ArgumentError write_triangle_mesh(tempname() * ".vtk",
+                                                        NTuple{3,Float64}[], [(1, 2, 3)])
+        @test_throws ArgumentError write_triangle_mesh(tempname() * ".vtk",
+                                                        [(0.0, 0.0, 0.0)],
+                                                        NTuple{3,Int}[])
+        @test_throws ArgumentError write_triangle_mesh(tempname() * ".vtk",
+                                                        [(0.0, 0.0, 0.0)], [(1, 2, 3)])
+    end
+
+    @testset "read_vtk_series round-trips the file run_pitch.jl writes" begin
+        path = tempname() * ".vtk.series"
+        write(path, """
+              {
+                "file-series-version" : "1.0",
+                "files" : [
+                  { "name" : "seam-00000.vtk", "time" : 0.007626 },
+                  { "name" : "seam-00003.vtk", "time" : 0.008057 },
+                  { "name" : "seam-00200.vtk", "time" : -1.5e-2 }
+                ]
+              }
+              """)
+        frames = read_vtk_series(path)
+        @test length(frames) == 3
+        @test frames[1] == (name = "seam-00000.vtk", time = 0.007626)
+        @test frames[2].name == "seam-00003.vtk"
+        @test frames[3].time ≈ -0.015
+
+        # A file with no name/time pairs at all is an empty series, not an
+        # error — but one whose counts disagree is not a series file at all.
+        empty_path = tempname() * ".vtk.series"
+        write(empty_path, "{}\n")
+        @test read_vtk_series(empty_path) == []
+
+        mismatched = tempname() * ".vtk.series"
+        write(mismatched, "\"name\" : \"a.vtk\", \"name\" : \"b.vtk\", \"time\" : 0.1\n")
+        @test_throws ArgumentError read_vtk_series(mismatched)
+    end
+
     @testset "it refuses what it cannot write" begin
         a = zeros(T, dims)
         @test_throws ArgumentError write_vtk(tempname() * ".vtk",
