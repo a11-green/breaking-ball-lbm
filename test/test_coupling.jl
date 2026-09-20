@@ -245,6 +245,48 @@
         @test isfinite(res)
     end
 
+    @testset "spin-up reports progress through a callback, not by printing" begin
+        # A production spin-up is thousands of sub-cycles of real computation
+        # with nothing to show for it until the end; the callback is what lets
+        # the driving script tell "slow" from "hung" without the library
+        # deciding how or how often to print.
+        g = uniform()
+        st = PitchState(BallState(; velocity = (39.0, 0.0, 0.0)))
+
+        seen = Tuple{Int,Float64}[]
+        res = spin_up!(g, run, st, wall; cycles = 10,
+                       callback = (i, r) -> (push!(seen, (i, r)); true))
+
+        @test length(seen) == 10
+        @test first.(seen) == 1:10                  # called once per cycle, in order
+        @test last(seen)[2] == res                  # the callback sees the same
+        @test all(isfinite, last.(seen))             # residual `spin_up!` returns
+
+        # Returning `false` stops early — the state after 3 cycles must match
+        # a `spin_up!` that was only ever asked to run 3.
+        g2 = uniform()
+        st2 = PitchState(BallState(; velocity = (39.0, 0.0, 0.0)))
+        spin_up!(g2, run, st2, wall; cycles = 3)
+
+        g3 = uniform()
+        st3 = PitchState(BallState(; velocity = (39.0, 0.0, 0.0)))
+        stopped_at = Ref(0)
+        spin_up!(g3, run, st3, wall; cycles = 10, callback = (i, r) -> begin
+            stopped_at[] = i
+            i < 3
+        end)
+        @test stopped_at[] == 3
+        @test collect(st3.ball.x) == collect(st2.ball.x)
+        @test st3.steps == st2.steps
+
+        # The default (no callback) still works exactly as before — the new
+        # keyword is additive.
+        g4 = uniform()
+        st4 = PitchState(BallState(; velocity = (39.0, 0.0, 0.0)))
+        res4 = spin_up!(g4, run, st4, wall; cycles = 10)
+        @test isfinite(res4)
+    end
+
     @testset "the controller supplies the momentum the sphere removes" begin
         # Two quantities by different routes: the uniform body force the
         # controller has settled on, times the fluid volume, against the

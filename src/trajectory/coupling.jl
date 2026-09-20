@@ -399,18 +399,31 @@ to_lattice_force(u::LatticeUnits, F::NTuple{3,<:Real}) =
     (to_lattice_force(u, F[1]), to_lattice_force(u, F[2]), to_lattice_force(u, F[3]))
 
 """
-    spin_up!(g, run, state, flow; cycles)
+    spin_up!(g, run, state, flow; cycles, callback)
 
 Develop the boundary layer with the trajectory frozen (§5). Returns the
 residual after the last cycle, which is the honest measure of whether the flow
 has settled enough to start integrating the trajectory.
+
+`callback(i, residual)` is called after every cycle, `i` from 1 to `cycles`,
+and may return `false` to stop early. This is the same shape as `fly!`'s
+callback and exists for the same reason: a production spin-up is thousands of
+sub-cycles of real computation — the boundary layer genuinely has to develop
+before the trajectory can be trusted to start moving — and with nothing
+printed in between, a caller watching the console cannot tell a slow spin-up
+from a hung one. The library does not print anything itself (I/O policy is the
+script's job, same as everywhere else here); it only gives the script
+something to print from.
 """
 function spin_up!(g, run::PitchRun{T}, st::PitchState{T},
-                  flow; cycles::Integer = 10) where {T}
+                  flow; cycles::Integer = 10, callback = nothing) where {T}
     local res = T(Inf)
-    for _ in 1:cycles
+    for i in 1:cycles
         couple_step!(g, run, st, flow; frozen = true)
         res = couple_residual(run, st, flow)
+        if callback !== nothing && callback(i, res) === false
+            break
+        end
     end
     return res
 end

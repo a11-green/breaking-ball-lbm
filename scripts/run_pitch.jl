@@ -510,15 +510,27 @@ function main(args)
         c.snapshot > 0 && solid_mask_of(flow)
     end
 
-    print("Spin-up ($spinup sub-cycles, trajectory frozen) ... ")
+    residual_name = c.open_faces ? "drift" : "residual"
+    @printf("Spin-up     %d sub-cycles, trajectory frozen — developing the wake ",
+            spinup)
+    println("before the ball is allowed to move (§5)")
     flush(stdout)
     t0 = time()
-    res = spin_up!(g, run, st, flow; cycles = spinup)
-    # The two configurations check different things and the number means
-    # different things, so it is named rather than left to be misread as one
-    # quantity that changed value (`couple_residual`).
-    @printf("done in %.0f s, %s %.4f\n", time() - t0,
-            c.open_faces ? "free-stream drift" : "momentum residual", res)
+    # Printed periodically rather than once at the end: this loop is doing the
+    # same per-sub-cycle work the flight does (§5), and at production size it
+    # is minutes to an hour of silence with nothing distinguishing "slow" from
+    # "hung" — the console looks identical either way until this prints.
+    res = spin_up!(g, run, st, flow; cycles = spinup, callback = (i, r) -> begin
+        if i == spinup || i % c.report_every == 0
+            elapsed = time() - t0
+            eta = i < spinup ? elapsed / i * (spinup - i) : 0.0
+            @printf("  %6d / %-6d (%5.1f%%)  %s %-9.4f  %6.0f s elapsed, ~%.0f s remaining\n",
+                    i, spinup, 100i / spinup, residual_name, r, elapsed, eta)
+            flush(stdout)
+        end
+        true
+    end)
+    @printf("Spin-up done in %.0f s, %s %.4f\n", time() - t0, residual_name, res)
 
     rows = NamedTuple[]
     t1 = time()
@@ -712,9 +724,19 @@ function main(args)
         end
 
         if cycles % c.report_every == 0 || s.ball.x[1] >= c.distance
-            @printf("%-9.4f %-8.3f %-8.4f %-8.4f %-8.2f %-7.3f %-7.3f %-7.3f %-6d %-8.4f\n",
+            # Progress by position, not by sub-cycle count: re-cuts and the
+            # occasional snapshot make the per-cycle cost uneven, but how far
+            # the ball has flown toward `--distance` is exactly what "how much
+            # is left" means here, and it needs no a priori step estimate.
+            frac = clamp((s.ball.x[1] - c.release[1]) / (c.distance - c.release[1]),
+                        0.0, 1.0)
+            elapsed = time() - t1
+            eta = frac > 0 ? elapsed / frac * (1 - frac) : NaN
+            @printf("%-9.4f %-8.3f %-8.4f %-8.4f %-8.2f %-7.3f %-7.3f %-7.3f %-6d " *
+                    "%-8.4f %-6.1f %-8.0f %-8.0f\n",
                     s.ball.t, s.ball.x[1], s.ball.x[2], s.ball.x[3], speed(s.ball),
-                    CD, CL, Cs, rows[end].recuts, rows[end].residual)
+                    CD, CL, Cs, rows[end].recuts, rows[end].residual, 100 * frac,
+                    elapsed, eta)
             flush(stdout)
         end
 
@@ -744,9 +766,9 @@ function main(args)
     overview!(st)
     println()
 
-    @printf("%-9s %-8s %-8s %-8s %-8s %-7s %-7s %-7s %-6s %-8s\n",
+    @printf("%-9s %-8s %-8s %-8s %-8s %-7s %-7s %-7s %-6s %-8s %-6s %-8s %-8s\n",
             "t (s)", "x (m)", "y (m)", "z (m)", "|V|", "C_D", "C_L", "C_side", "cuts",
-            c.open_faces ? "drift" : "residual")
+            c.open_faces ? "drift" : "residual", "prog%", "elapsed", "ETA(s)")
     fly!(g, run, st, flow; cycles = c.max_cycles, callback = sample!)
     wall_time = time() - t1
 
