@@ -20,7 +20,8 @@ CPU側は一通り動作し、解析解に対する検証を通っている。
 Julia 1.10以降が必要。
 
 ```bash
-julia --project=. -e 'using Pkg; Pkg.test()'
+julia --project=. -e 'using Pkg; Pkg.test()'    # POSIX shells, PowerShell
+julia --project=. -e "using Pkg; Pkg.test()"    # cmd.exe (単一引用符は文字列にならない)
 ```
 
 ### GPU（要 NVIDIA GPU）
@@ -29,7 +30,8 @@ CUDA と StaticArrays は弱依存（`[weakdeps]`）なので、**プロジェ�
 `--project=.` を付けて `Pkg.add` すると `[deps]` と `[weakdeps]` が衝突してエラーになる。
 
 ```bash
-julia -e 'using Pkg; Pkg.add(["CUDA", "StaticArrays"])'   # デフォルト環境へ
+julia -e 'using Pkg; Pkg.add(["CUDA", "StaticArrays"])'         # POSIX shells, PowerShell
+julia -e "using Pkg; Pkg.add([\"CUDA\", \"StaticArrays\"])"     # cmd.exe
 julia --project=. scripts/benchmark_gpu.jl
 ```
 
