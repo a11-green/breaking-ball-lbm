@@ -463,8 +463,7 @@ function main(args)
     # printing the two separately is what catches a --distance that was set as
     # if it were the travel length (§ "ちなみに、ディスタンスはどこからの距離
     # ですか").
-    @printf("Flight      release x=%.2f -> plate x=%.2f (%.2f m of travel), " *
-            "%.0f steps expected, re-cut every %d\n",
+    @printf("Flight      release x=%.2f -> plate x=%.2f (%.2f m of travel), %.0f steps expected, re-cut every %d\n",
             c.release[1], c.distance, c.distance - c.release[1],
             (c.distance - c.release[1]) / c.speed / units.dt, nsub)
     @printf("Spin-up     %d sub-cycles = %d steps = %.1f flow-through times\n",
@@ -732,8 +731,7 @@ function main(args)
                         0.0, 1.0)
             elapsed = time() - t1
             eta = frac > 0 ? elapsed / frac * (1 - frac) : NaN
-            @printf("%-9.4f %-8.3f %-8.4f %-8.4f %-8.2f %-7.3f %-7.3f %-7.3f %-6d " *
-                    "%-8.4f %-6.1f %-8.0f %-8.0f\n",
+            @printf("%-9.4f %-8.3f %-8.4f %-8.4f %-8.2f %-7.3f %-7.3f %-7.3f %-6d %-8.4f %-6.1f %-8.0f %-8.0f\n",
                     s.ball.t, s.ball.x[1], s.ball.x[2], s.ball.x[3], speed(s.ball),
                     CD, CL, Cs, rows[end].recuts, rows[end].residual, 100 * frac,
                     elapsed, eta)
