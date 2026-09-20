@@ -148,7 +148,13 @@ function parse_args(args)
               --speed V            release speed, m/s (default $(c.speed))
               --rpm R              spin rate (default $(c.rpm))
               --axis x,y,z         spin axis (default 0,0,1 — sidespin)
-              --distance D         release to plate, m (default $(round(c.distance, digits=3)))
+              --distance D         the plate's position in x, m from the coordinate
+                                   origin (the rubber) — NOT how far the ball
+                                   flies. The flight length is distance minus
+                                   --release's x (default $(round(c.distance, digits=3)),
+                                   the real rubber-to-plate spec; with the default
+                                   --release of x=2.0 the ball travels 16.44 m,
+                                   matching a realistic release extension)
               --spinup N           sub-cycles before the trajectory is released
               --spinup-flowthroughs F  instead, in box flow-through times (default $(c.spinup_flowthroughs))
               --refine F[,G...]    refine a box of F diameters around the ball to 2x,
@@ -453,7 +459,13 @@ function main(args)
              max(1, round(Int, c.spinup_flowthroughs * flowthrough / nsub))
     @printf("Sub-cycle   %d steps (surface turns %.4f spacings per step)\n",
             nsub, surface_drift_per_step(wall, spin_lat))
-    @printf("Flight      %.0f steps expected, re-cut every %d\n",
+    # `distance` is where the plate sits in x, not how far the ball flies —
+    # printing the two separately is what catches a --distance that was set as
+    # if it were the travel length (§ "ちなみに、ディスタンスはどこからの距離
+    # ですか").
+    @printf("Flight      release x=%.2f -> plate x=%.2f (%.2f m of travel), " *
+            "%.0f steps expected, re-cut every %d\n",
+            c.release[1], c.distance, c.distance - c.release[1],
             (c.distance - c.release[1]) / c.speed / units.dt, nsub)
     @printf("Spin-up     %d sub-cycles = %d steps = %.1f flow-through times\n",
             spinup, spinup * nsub, spinup * nsub / flowthrough)
