@@ -93,7 +93,9 @@ function parse_args(args)
                                   pitcher — see the header comment)
               --reference-speed V override the reference pitch's release speed, m/s
               --reference-rpm R   override the reference pitch's spin rate
-              --fps N             auto-play frame rate (default $(c.fps))
+              --fps N             auto-play frame rate at startup — also
+                                  adjustable live with the "speed (fps)"
+                                  slider (default $(c.fps))
               --web               WGLMakie in a browser instead of GLMakie in a window
               --backend NAME      glmakie (a window), wglmakie (a browser), or
                                   cairomakie (a still file, no display at all)
@@ -373,10 +375,14 @@ function main(c::AnalyzeConfig)
                        startvalue = round(Int, rad2deg(ax3d.elevation[])))
     Label(controls[1, 8], "ball ×"; tellwidth = false)
     scale_slider = Slider(controls[1, 9]; range = 1:1:60, startvalue = round(Int, c.ball_scale))
+    Label(controls[1, 10], "speed (fps)"; tellwidth = false)
+    speed_slider = Slider(controls[1, 11]; range = 1:1:120, startvalue = round(Int, c.fps))
 
     on(v -> ax3d.azimuth[] = deg2rad(v), az_slider.value)
     on(v -> ax3d.elevation[] = deg2rad(v), el_slider.value)
     on(v -> ball_scale_obs[] = Float64(v), scale_slider.value)
+    speed_obs = Observable(Float64(c.fps))
+    on(v -> speed_obs[] = Float64(v), speed_slider.value)
 
     playing = Observable(false)
     on(reset_btn.clicks) do _
@@ -401,33 +407,42 @@ function main(c::AnalyzeConfig)
         set_close_to!(el_slider, MLB_ELEVATION_DEG)
     end
 
-    # Two separate `@async` + `sleep` polling loops did nothing when actually
-    # run (only the slider's own drag-driven `on` ever moved the frame), most
-    # likely because something in that loop threw and — running detached,
-    # with nothing ever `fetch`ing it — the exception had nowhere to surface:
-    # a `Task` failing silently is exactly "looks like it does nothing."
-    # Driving playback off Makie's own render tick instead of a hand-rolled
-    # task avoids the whole class of problem: it runs as an ordinary
-    # Observable callback in the same place the slider's callback already
-    # runs successfully, once per rendered frame, with no separate task or
-    # sleep loop to go quietly wrong.
+    display(fig)
+
+    # Two hand-rolled loops before this one — `@async` + `sleep`, then Makie's
+    # own `events(fig).tick` — both left "Pause" showing (so the click and
+    # `playing[]` were fine) with nothing actually moving. Both depend on
+    # something outside this script agreeing to run periodically: a detached
+    # `Task` needs the scheduler to give it a turn, and `tick` only exists at
+    # all if the backend's render loop is continuously repainting rather than
+    # only redrawing on demand — evidently not a safe assumption here.
+    # `Base.Timer` sidesteps both: it is serviced by Julia's own event loop
+    # (the same mechanism `sleep` itself is built on), independent of
+    # whatever GLMakie's redraw policy is. `set_close_to!` from inside its
+    # callback goes through the exact same `slider.value` Observable the
+    # mouse drag already updates successfully, so if the callback runs at
+    # all, the frame will visibly advance.
+    #
+    # The timer itself ticks at a fixed clock (`BASE_HZ`); the "speed" slider
+    # changes how many rows that clock advances per second via `speed_obs`
+    # and an accumulator, rather than tearing down and rebuilding the timer
+    # every time the slider moves.
+    BASE_HZ = 30.0
     play_accum = Ref(0.0)
-    on(events(fig).tick) do tick
+    playback_timer = Timer(1 / BASE_HZ; interval = 1 / BASE_HZ) do _
         playing[] || return
-        play_accum[] += tick.delta_time
-        step = 1.0 / max(c.fps, 1.0)
-        while play_accum[] >= step
-            play_accum[] -= step
+        play_accum[] += speed_obs[] / BASE_HZ
+        while play_accum[] >= 1.0
+            play_accum[] -= 1.0
             nxt = slider.value[] < n ? slider.value[] + 1 : 1
             set_close_to!(slider, nxt)
         end
     end
-
-    display(fig)
     println("Drag in the 3-D panel to rotate, scroll to zoom, drag the slider",
             " to scrub through the flight.")
-    println("Reset/Play control playback; the azimuth/elevation sliders aim the",
-            " 3-D camera and \"MLB view\" jumps to a broadcast-angle starting guess.")
+    println("Reset/Play control playback, and the speed slider changes its rate",
+            " live; the azimuth/elevation sliders aim the 3-D camera and",
+            " \"MLB view\" jumps to a broadcast-angle starting guess.")
     println("Press Enter to close.")
     readline()
 end
