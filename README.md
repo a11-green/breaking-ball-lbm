@@ -162,9 +162,43 @@ Makieのインストールは `view_pitch.jl` と同様（デフォルト環境�
 | `--compare FILE` | なし（繰り返し指定可） | 別の実行の軌跡CSVを重ね描きする（自分で計算した別の球種・別解像度との比較用） |
 | `--reference NAME` | なし | `view_pitch.jl` の解析モデル（`PITCH_TYPES`）から汎用的な参考球種を重ね描きする。名前は `4-seam fastball`, `2-seam / sinker`, `sweeper`, `gyroball`, `12-6 curve`。**特定の投手の実測値ではなく典型的なパラメータ**（大谷投手個人のフォーシームの実測値をBaseball Savantで確認できていないため。§11参照） |
 | `--reference-speed V` / `--reference-rpm R` | 参考球種自身の値 | `--reference` の球速・回転数を上書き |
+| `--shift-y M` | 0.0 | 表示専用でCFD軌道のyだけをM平行移動する（再計算はしない）。実際の投手のリリースポイントの横位置に合わせて見せたい時用——変化量の数値には影響しない（3定義ともリリース位置からの相対値のため）。`--compare`・`--reference`はシフトされない |
 | `--fps N` | 30.0 | 自動再生のフレームレート |
 | `--backend` / `--web` / `--record` | `view_pitch.jl` と同じ | 描画バックエンドと出力先 |
 
 読み込みは列名ベースで、必要な列（`t,x,y,z,speed,CD,CL,Cside,rpm,u_in_*,q*,w*,recuts,residual`）が無いCSVは、どの列が足りないかを明示するエラーで止まる——列が増減しても、足りない列だけを名指しできるようにするための設計（`src/postprocess/pitch_csv.jl`、`read_pitch_csv`/`require_columns`）。
 
 **表示中の操作**（`--record` を使わない場合）: スクラブ用スライダーのほか、Reset/Play で自動再生（"speed (fps)" スライダーで再生中も速度を変更できる）、方位角(azimuth)・仰角(elevation)スライダーで3Dカメラを向ける、「MLB view」ボタンで放送中継風のアングル（投手の背後から本塁方向、やや見下ろし）に飛ぶ——ただしこのボタンの角度は未検証（このサンドボックスにMakieを入れられずGUIで確認できていない）ので、実際の中継映像と見比べてスライダーで追い込み、ちょうどいい値を教えてもらえれば既定値として焼き込む。
+
+## `scripts/measure_break.jl` — CFD軌道からのpfx/induced/total変化量
+
+`run_pitch.jl` の実行末尾に出る「Break測定は…re-integrate from the CSV with the Magnus component removed」の実装（§8 V&V-5）。解析係数モデルなら `no_magnus(aero)` がCL_slopeを0にするだけで済むが、CFDには「マグヌスを切った以外は同じ」実行が存在しない。代わりに、この実行自身が測定したC_D(t)（一定値ではなく実際の乱流変動込みの抗力履歴）から揚力・横力を完全に0とした抗力のみのモデルを作り、分岐点（リリース／プレート手前40ft）から再積分する。計算本体は `src/postprocess/measured_break.jl`（`measure_break`関数、Makie不要・`test/test_measured_break.jl`でテスト済み）にあり、このスクリプトは結果を表示するだけの薄いラッパー。
+
+```bash
+julia --project=. scripts/measure_break.jl pitch.csv
+julia --project=. scripts/measure_break.jl pitch.csv --dt 1e-5
+julia --project=. scripts/measure_break.jl --help
+```
+
+Makie不要・GPU不要の純粋な数値後処理。
+
+## `scripts/plot_break.jl` — 変化量の比較グラフ
+
+`measure_break.jl` と同じ数値（この実行のpfx/induced/total）を、`pitch_metrics`（`PITCH_TYPES`の解析係数モデル、既定は`sweeper`——WBC決勝ケースと同じ諸元）および報道された変化量（17インチ・32インチ、出典はDESIGN.md §8参照）と並べて棒グラフにする。
+
+```bash
+julia --project=. scripts/plot_break.jl pitch.csv
+julia --project=. scripts/plot_break.jl pitch.csv --assume pfx
+julia --project=. scripts/plot_break.jl pitch.csv --backend cairomakie --record break.png
+julia --project=. scripts/plot_break.jl --help
+```
+
+| オプション | 既定値 | 意味 |
+|---|---|---|
+| `CSV`（位置引数）/ `--csv FILE` | pitch.csv | 読み込む軌跡CSV |
+| `--dt T` | 1e-4 | 参照軌道の積分ステップ |
+| `--reference NAME` | sweeper | 比較する解析係数モデルの球種（`PITCH_TYPES`） |
+| `--assume DEF` | total | 報道値（17"/32"）の破線ラベルに使う定義名（pfx/induced/total）。**出典に定義の明記はなく**、ラベルの文言が変わるだけで計算には影響しない |
+| `--backend` / `--web` / `--record` | `analyze_pitch.jl` と同じ | 描画バックエンドと出力先 |
+
+報道値の破線は特定の棒に対応付けず、グラフ全体を横切る一本の参照線として描く——どの定義と比較して読むかは見る側に委ねる（DESIGN.md §11: 縦の変化量「32インチ」は3定義のいずれとも一致しないという未解決事項があるため）。

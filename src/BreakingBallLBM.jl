@@ -42,6 +42,7 @@ include("refine/multi_grid.jl")
 include("postprocess/fields.jl")
 include("postprocess/pitch_view.jl")
 include("postprocess/pitch_csv.jl")
+include("postprocess/measured_break.jl")
 include("postprocess/vtk.jl")
 include("config.jl")
 include("refine/refined_flow.jl")
@@ -83,6 +84,7 @@ export LBMState, Lattice, D3Q19, D3Q27,
     init_refined!, level_macroscopic, node_macroscopic,
     TrajectorySamples, samples, break_references, seam_world, spin_axis_world,
     read_pitch_csv, require_columns, moving_average, default_smoothing_window,
+    MeasuredDragAero, cd_at, row_at_x, MeasuredBreak, measure_break,
     PITCH_TYPES, pitch_family, at_time, plate_box, coefficient_series,
     velocity_field, density_field, magnitude, velocity_gradient,
     write_vtk, write_snapshot, write_polylines, snapshot_box,
