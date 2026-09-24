@@ -31,6 +31,11 @@
 # comparing your own CFD runs against each other — a sweeper vs. a fastball
 # you also simulated, or two resolutions of the same pitch.
 #
+# **--shift-y** redraws the trajectory with a constant lateral offset, for
+# display only (no re-run, no change to break numbers — see --help). Use it
+# to place a run made with release[2] = 0 at a real pitcher's actual release
+# point once you have one, e.g. from Baseball Savant's release_pos_x.
+#
 # Same Makie install note as view_pitch.jl: it is not a dependency of this
 # package, and cmd.exe does not take single quotes as quotes.
 #
@@ -57,6 +62,7 @@ Base.@kwdef mutable struct AnalyzeConfig
     reference_speed::Float64 = NaN   # NaN: take the named pitch's own
     reference_rpm::Float64 = NaN
     fps::Float64 = 30.0
+    shift_y::Float64 = 0.0    # display-only lateral offset, m — see --shift-y
 end
 
 const REQUIRED_COLUMNS = (:t, :x, :y, :z, :speed, :CD, :CL, :Cside, :rpm,
@@ -93,6 +99,17 @@ function parse_args(args)
                                   pitcher — see the header comment)
               --reference-speed V override the reference pitch's release speed, m/s
               --reference-rpm R   override the reference pitch's spin rate
+              --shift-y M         shift the CFD trajectory's y (only, for display)
+                                  by M metres — e.g. a real pitcher's release
+                                  point is off the rubber's centreline by more
+                                  than this run's release[2] used, and this
+                                  redraws it there without a re-run. Positive
+                                  is the pitcher's left; a right-handed
+                                  pitcher's arm-side offset is negative here.
+                                  Does not touch --compare or --reference,
+                                  and does not change any break number (all
+                                  three definitions are relative to the
+                                  release point, so a constant shift cancels)
               --fps N             auto-play frame rate at startup — also
                                   adjustable live with the "speed (fps)"
                                   slider (default $(c.fps))
@@ -112,6 +129,7 @@ function parse_args(args)
         elseif a == "--reference";        c.reference = take()
         elseif a == "--reference-speed";  c.reference_speed = parse(Float64, take())
         elseif a == "--reference-rpm";    c.reference_rpm = parse(Float64, take())
+        elseif a == "--shift-y";          c.shift_y = parse(Float64, take())
         elseif a == "--fps";              c.fps = parse(Float64, take())
         elseif a == "--web";              c.backend = "wglmakie"
         elseif a == "--backend";          c.backend = lowercase(take())
@@ -200,7 +218,7 @@ function main(c::AnalyzeConfig)
     cmp_colors = Makie.wong_colors()
     cmp_label(p) = splitext(basename(p))[1]
 
-    reference = reference_run(c, (data[:x][1], data[:y][1], data[:z][1]), data[:x][end])
+    reference = reference_run(c, (data[:x][1], data[:y][1] + c.shift_y, data[:z][1]), data[:x][end])
     if reference !== nothing
         println("reference: ", reference.name,
                 " (analytic model, typical parametrization — not a specific pitcher)")
@@ -215,7 +233,7 @@ function main(c::AnalyzeConfig)
     ax3d = Axis3(fig[1:3, 1]; aspect = :data, title = basename(c.csv),
                  xlabel = "toward the plate (m)", ylabel = "pitcher's left (m)",
                  zlabel = "up (m)")
-    path3 = [Point3f(data[:x][i], data[:y][i], data[:z][i]) for i in 1:n]
+    path3 = [Point3f(data[:x][i], data[:y][i] + c.shift_y, data[:z][i]) for i in 1:n]
     lines!(ax3d, path3; color = :crimson, linewidth = 3, label = "CFD trajectory")
     for (k, cmp) in enumerate(compares)
         cd = cmp.data
@@ -244,11 +262,11 @@ function main(c::AnalyzeConfig)
     orientation(i) = Quat(data[:qw][i], data[:qx][i], data[:qy][i], data[:qz][i])
     lines!(ax3d, lift((i, s) -> [Point3f(p...) for p in
                                  seam_world(geom, orientation(i),
-                                           (data[:x][i], data[:y][i], data[:z][i]);
+                                           (data[:x][i], data[:y][i] + c.shift_y, data[:z][i]);
                                            samples = c.seam_samples, scale = s)],
                       frame, ball_scale_obs); color = :firebrick, linewidth = 3)
     linesegments!(ax3d, lift((i, r) -> begin
-                                 b = BallState(; position = (data[:x][i], data[:y][i], data[:z][i]),
+                                 b = BallState(; position = (data[:x][i], data[:y][i] + c.shift_y, data[:z][i]),
                                               velocity = (0.0, 0.0, 0.0),
                                               spin = (data[:wx][i], data[:wy][i], data[:wz][i]))
                                  a, e = spin_axis_world(b, 4 * r)
@@ -258,7 +276,7 @@ function main(c::AnalyzeConfig)
     # --- catcher's view: the plane break is quoted in ---
     axc = Axis(fig[1, 2]; title = "from the catcher", xlabel = "pitcher's left (m)",
               ylabel = "up (m)", aspect = DataAspect())
-    lines!(axc, data[:y], data[:z]; color = :crimson, linewidth = 2)
+    lines!(axc, data[:y] .+ c.shift_y, data[:z]; color = :crimson, linewidth = 2)
     for (k, cmp) in enumerate(compares)
         lines!(axc, cmp.data[:y], cmp.data[:z];
               color = cmp_colors[mod1(k, length(cmp_colors))], linewidth = 2, linestyle = :dash)
@@ -267,7 +285,7 @@ function main(c::AnalyzeConfig)
                                     color = (:gray30, 0.8), linewidth = 2, linestyle = :dot)
     lines!(axc, [p[2] for p in plate_box()], [p[3] for p in plate_box()];
           color = :black, linewidth = 2)
-    scatter!(axc, lift(i -> Point2f(data[:y][i], data[:z][i]), frame);
+    scatter!(axc, lift(i -> Point2f(data[:y][i] + c.shift_y, data[:z][i]), frame);
              color = :crimson, markersize = 14)
 
     # --- side view: true scale, rubber to plate, ground up — a real-world
