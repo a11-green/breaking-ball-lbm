@@ -36,6 +36,12 @@
 # to place a run made with release[2] = 0 at a real pitcher's actual release
 # point once you have one, e.g. from Baseball Savant's release_pos_x.
 #
+# The catcher's-view panel also marks where each of the three break
+# references (pfx/induced/total, §8 V&V-5) crosses the plate, with a dotted
+# line back to where the pitch actually arrived — the same numbers
+# `scripts/measure_break.jl`/`scripts/plot_break.jl` report, drawn instead of
+# printed. Needs vx,vy,vz in the CSV; skipped with a note if they are absent.
+#
 # Same Makie install note as view_pitch.jl: it is not a dependency of this
 # package, and cmd.exe does not take single quotes as quotes.
 #
@@ -223,6 +229,26 @@ function main(c::AnalyzeConfig)
         println("reference: ", reference.name,
                 " (analytic model, typical parametrization — not a specific pitcher)")
     end
+
+    # The catcher's-view break markers (§8 V&V-5) need vx,vy,vz, which older
+    # CSVs may not have — skip them rather than fail the whole plot over a
+    # panel decoration.
+    brk = if all(haskey(data, k) for k in (:vx, :vy, :vz))
+        try
+            measure_break(data)
+        catch err
+            println("break markers skipped: ", sprint(showerror, err))
+            nothing
+        end
+    else
+        nothing
+    end
+    if brk !== nothing
+        @printf("break at the plate: pfx %.1f\"/%.1f\"  induced %.1f\"/%.1f\"  total %.1f\"/%.1f\" (horiz/vert)\n",
+                inches(brk.pfx_horizontal), inches(brk.pfx_vertical),
+                inches(brk.induced_horizontal), inches(brk.induced_vertical),
+                inches(brk.total_horizontal), inches(brk.total_vertical))
+    end
     println()
 
     geom = BaseballGeometry()
@@ -287,6 +313,27 @@ function main(c::AnalyzeConfig)
           color = :black, linewidth = 2)
     scatter!(axc, lift(i -> Point2f(data[:y][i] + c.shift_y, data[:z][i]), frame);
              color = :crimson, markersize = 14)
+
+    # --- break markers: where each reference trajectory of §8 V&V-5 crosses
+    #     the plate, with a dotted line back to where the pitch actually did ---
+    if brk !== nothing
+        actual_y_s = brk.actual_y + c.shift_y
+        for (name, ry, rz, h, v, col, mk) in (
+                ("pfx", brk.pfx_ref_y, brk.pfx_ref_z, brk.pfx_horizontal, brk.pfx_vertical,
+                 :steelblue, :diamond),
+                ("induced", brk.induced_ref_y, brk.induced_ref_z, brk.induced_horizontal,
+                 brk.induced_vertical, :seagreen, :rect),
+                ("total", brk.total_ref_y, brk.total_ref_z, brk.total_horizontal,
+                 brk.total_vertical, :goldenrod, :utriangle))
+            ry_s = ry + c.shift_y
+            lines!(axc, [ry_s, actual_y_s], [rz, brk.actual_z]; color = (col, 0.7),
+                  linewidth = 1.5, linestyle = :dot)
+            scatter!(axc, [ry_s], [rz]; color = col, marker = mk, markersize = 14)
+            text!(axc, ry_s, rz;
+                 text = "$name $(round(inches(h), digits = 1))\"/$(round(inches(v), digits = 1))\"",
+                 fontsize = 9, color = col, align = (:center, :top), offset = (0, -8))
+        end
+    end
 
     # --- side view: true scale, rubber to plate, ground up — a real-world
     #     reference frame rather than one autoscaled to whatever this run's

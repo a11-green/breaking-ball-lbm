@@ -82,6 +82,15 @@
         @test mb.induced_vertical ≈ pm.induced_vertical atol = atol
         @test mb.total_horizontal ≈ pm.total_horizontal atol = atol
         @test mb.total_vertical ≈ pm.total_vertical atol = atol
+
+        # The reference points are consistent with the differences by
+        # construction — a viewer draws the points, not just the gap to them.
+        @test mb.actual_y - mb.pfx_ref_y ≈ mb.pfx_horizontal
+        @test mb.actual_z - mb.pfx_ref_z ≈ mb.pfx_vertical
+        @test mb.actual_y - mb.induced_ref_y ≈ mb.induced_horizontal
+        @test mb.actual_z - mb.induced_ref_z ≈ mb.induced_vertical
+        @test mb.actual_y - mb.total_ref_y ≈ mb.total_horizontal
+        @test mb.actual_z - mb.total_ref_z ≈ mb.total_vertical
     end
 
     @testset "complains about missing columns and short data, not just crashes" begin

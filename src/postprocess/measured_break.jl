@@ -90,12 +90,24 @@ struct MeasuredBreak{T<:AbstractFloat}
     plate_x::T
     plate_t::T
     plate_speed::T
+    actual_y::T
+    actual_z::T
     pfx_horizontal::T
     pfx_vertical::T
     induced_horizontal::T
     induced_vertical::T
     total_horizontal::T
     total_vertical::T
+    # Where each reference trajectory crosses the plate, in the same (y, z) a
+    # trajectory plot already draws — e.g. `actual_y - pfx_ref_y ==
+    # pfx_horizontal`. Kept alongside the differences so a viewer can draw the
+    # three reference points themselves, not just report the gap to them.
+    pfx_ref_y::T
+    pfx_ref_z::T
+    induced_ref_y::T
+    induced_ref_z::T
+    total_ref_y::T
+    total_ref_z::T
 end
 
 """
@@ -141,7 +153,9 @@ function measure_break(data; dt::Real = 1.0e-4, distance::Real = PLATE_DISTANCE)
         release.x, release.t, sqrt(release.vx^2 + release.vy^2 + release.vz^2),
         actual.x, actual.t,
         sqrt(sum(abs2, (data[:vx][end], data[:vy][end], data[:vz][end]))),
+        actual.y, actual.z,
         actual.y - pfx_ref.x[2], actual.z - pfx_ref.x[3],
         actual.y - induced_ref.x[2], actual.z - induced_ref.x[3],
-        actual.y - total_y, actual.z - total_z)
+        actual.y - total_y, actual.z - total_z,
+        pfx_ref.x[2], pfx_ref.x[3], induced_ref.x[2], induced_ref.x[3], total_y, total_z)
 end
