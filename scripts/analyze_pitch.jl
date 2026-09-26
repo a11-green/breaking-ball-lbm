@@ -67,7 +67,7 @@ Base.@kwdef mutable struct AnalyzeConfig
     reference::String = ""       # a PITCH_TYPES name, or "" for none
     reference_speed::Float64 = NaN   # NaN: take the named pitch's own
     reference_rpm::Float64 = NaN
-    fps::Float64 = 30.0
+    fps::Float64 = NaN    # NaN: auto — n / TARGET_PLAYBACK_SECONDS, see main()
     shift_y::Float64 = 0.0    # display-only lateral offset, m — see --shift-y
 end
 
@@ -77,6 +77,13 @@ const REQUIRED_COLUMNS = (:t, :x, :y, :z, :speed, :CD, :CL, :Cside, :rpm,
 
 # 1 mph = 0.44704 m/s exactly, by definition — not an approximation.
 const MPH_PER_MPS = 1 / 0.44704
+
+# How long a full playthrough takes at the default (--fps unset) speed,
+# regardless of how many rows the run has — a 70-row smoke test and a
+# 48,000-row production run both finish in about this many seconds.
+const TARGET_PLAYBACK_SECONDS = 5.0
+const MIN_SPEED_FPS = 1.0
+const MAX_SPEED_FPS = 20_000.0
 
 function parse_args(args)
     c = AnalyzeConfig()
@@ -116,9 +123,12 @@ function parse_args(args)
                                   and does not change any break number (all
                                   three definitions are relative to the
                                   release point, so a constant shift cancels)
-              --fps N             auto-play frame rate at startup — also
-                                  adjustable live with the "speed (fps)"
-                                  slider (default $(c.fps))
+              --fps N             auto-play rate, rows/second, at startup —
+                                  also adjustable live (1 to 20,000, log-spaced)
+                                  with the "speed (fps)" slider. Default is
+                                  automatic: this run's row count / $(round(Int, TARGET_PLAYBACK_SECONDS))
+                                  s, so any CSV plays through in about
+                                  $(round(Int, TARGET_PLAYBACK_SECONDS)) s at the default speed
               --web               WGLMakie in a browser instead of GLMakie in a window
               --backend NAME      glmakie (a window), wglmakie (a browser), or
                                   cairomakie (a still file, no display at all)
@@ -202,12 +212,33 @@ function reference_run(c::AnalyzeConfig, release::NTuple{3,<:Real}, distance::Re
     return (name = spec.name, samples = samples(traj))
 end
 
+"""Log-spaced integer speeds from `lo` to `hi`, for a slider whose usable
+range spans several orders of magnitude (1 row/s of careful scrubbing up to
+tens of thousands, for skimming a long run in a couple of seconds) — equal
+steps would make anything below a few hundred unreachable without also
+compressing the whole fast end into one slider pixel."""
+function log_speed_range(lo::Real, hi::Real, count::Integer)
+    vals = round.(Int, exp10.(range(log10(lo), log10(hi); length = count)))
+    return sort(unique(vals))
+end
+
+"""The nearest value in `vals` to `target` — for snapping a slider's initial
+position onto its own discrete range."""
+nearest(vals, target) = vals[argmin(abs.(vals .- target))]
+
 function main(c::AnalyzeConfig)
     run = load_run(c.csv, c.smooth)
     data, t, n, window = run.data, run.t, run.n, run.window
 
+    speed_values = log_speed_range(MIN_SPEED_FPS, MAX_SPEED_FPS, 80)
+    default_fps = isnan(c.fps) ? clamp(n / TARGET_PLAYBACK_SECONDS, MIN_SPEED_FPS, MAX_SPEED_FPS) :
+                                 c.fps
+    start_fps = nearest(speed_values, default_fps)
+
     @printf("%s: %d rows, t = %.4f – %.4f s (%.4f s), x = %.3f – %.3f m\n",
             c.csv, n, data[:t][1], data[:t][end], t[end], data[:x][1], data[:x][end])
+    isnan(c.fps) && @printf("auto speed: %d rows/s (~%.0f s full playback) — override with --fps\n",
+                            start_fps, n / start_fps)
     @printf("speed %.3f -> %.3f m/s, rpm %.1f -> %.1f, smoothing window %d sub-cycles\n",
             data[:speed][1], data[:speed][end], data[:rpm][1], data[:rpm][end], window)
     half = (n ÷ 2 + 1):n
@@ -441,12 +472,12 @@ function main(c::AnalyzeConfig)
     Label(controls[1, 8], "ball ×"; tellwidth = false)
     scale_slider = Slider(controls[1, 9]; range = 1:1:60, startvalue = round(Int, c.ball_scale))
     Label(controls[1, 10], "speed (fps)"; tellwidth = false)
-    speed_slider = Slider(controls[1, 11]; range = 1:1:120, startvalue = round(Int, c.fps))
+    speed_slider = Slider(controls[1, 11]; range = speed_values, startvalue = start_fps)
 
     on(v -> ax3d.azimuth[] = deg2rad(v), az_slider.value)
     on(v -> ax3d.elevation[] = deg2rad(v), el_slider.value)
     on(v -> ball_scale_obs[] = Float64(v), scale_slider.value)
-    speed_obs = Observable(Float64(c.fps))
+    speed_obs = Observable(Float64(start_fps))
     on(v -> speed_obs[] = Float64(v), speed_slider.value)
 
     playing = Observable(false)
@@ -491,16 +522,21 @@ function main(c::AnalyzeConfig)
     # The timer itself ticks at a fixed clock (`BASE_HZ`); the "speed" slider
     # changes how many rows that clock advances per second via `speed_obs`
     # and an accumulator, rather than tearing down and rebuilding the timer
-    # every time the slider moves.
+    # every time the slider moves. At the high end of the speed range this is
+    # thousands of rows per tick, so it jumps straight there in one
+    # `set_close_to!` (one redraw) rather than looping row by row — a loop
+    # would mean thousands of redraws squeezed into each 1/30 s tick, which
+    # is both pointless (nothing is visible for one row at that speed) and
+    # itself slow enough to defeat the point of asking for "fast".
     BASE_HZ = 30.0
     play_accum = Ref(0.0)
     playback_timer = Timer(1 / BASE_HZ; interval = 1 / BASE_HZ) do _
         playing[] || return
         play_accum[] += speed_obs[] / BASE_HZ
-        while play_accum[] >= 1.0
-            play_accum[] -= 1.0
-            nxt = slider.value[] < n ? slider.value[] + 1 : 1
-            set_close_to!(slider, nxt)
+        step = floor(Int, play_accum[])
+        if step >= 1
+            play_accum[] -= step
+            set_close_to!(slider, mod1(slider.value[] + step, n))
         end
     end
     println("Drag in the 3-D panel to rotate, scroll to zoom, drag the slider",

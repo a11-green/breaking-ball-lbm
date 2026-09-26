@@ -165,7 +165,7 @@ Makieのインストールは `view_pitch.jl` と同様（デフォルト環境�
 | `--reference NAME` | なし | `view_pitch.jl` の解析モデル（`PITCH_TYPES`）から汎用的な参考球種を重ね描きする。名前は `4-seam fastball`, `2-seam / sinker`, `sweeper`, `gyroball`, `12-6 curve`。**特定の投手の実測値ではなく典型的なパラメータ**（大谷投手個人のフォーシームの実測値をBaseball Savantで確認できていないため。§11参照） |
 | `--reference-speed V` / `--reference-rpm R` | 参考球種自身の値 | `--reference` の球速・回転数を上書き |
 | `--shift-y M` | 0.0 | 表示専用でCFD軌道のyだけをM平行移動する（再計算はしない）。実際の投手のリリースポイントの横位置に合わせて見せたい時用——変化量の数値には影響しない（3定義ともリリース位置からの相対値のため）。`--compare`・`--reference`はシフトされない |
-| `--fps N` | 30.0 | 自動再生のフレームレート |
+| `--fps N` | 自動（行数/5秒） | 自動再生の速度（行/秒）。既定は「行数 ÷ 5秒」なので、疎通確認の数十行でも本番の数万行でも約5秒で全軌道を再生し終える。表示中も"speed (fps)"スライダー（1〜20,000、対数目盛）で変更できる |
 | `--backend` / `--web` / `--record` | `view_pitch.jl` と同じ | 描画バックエンドと出力先 |
 
 読み込みは列名ベースで、必要な列（`t,x,y,z,speed,CD,CL,Cside,rpm,u_in_*,q*,w*,recuts,residual`）が無いCSVは、どの列が足りないかを明示するエラーで止まる——列が増減しても、足りない列だけを名指しできるようにするための設計（`src/postprocess/pitch_csv.jl`、`read_pitch_csv`/`require_columns`）。
