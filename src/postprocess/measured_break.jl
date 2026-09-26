@@ -27,6 +27,16 @@ function instead of two copies drifting apart.
 """
 
 """
+The reported WBC 2023 final movement (CBS Sports / SI, DESIGN.md §8 V&V-5).
+No break definition is stated for these — a citation for a number, not a
+claim about which of pfx/induced/total it means. `scripts/plot_break.jl` and
+`scripts/analyze_pitch.jl` both draw against these, so the number lives here
+once rather than as a literal copied into each.
+"""
+const REPORTED_HORIZONTAL_IN = 17.0
+const REPORTED_VERTICAL_IN = -32.0   # a drop, so negative to match this project's sign
+
+"""
     MeasuredDragAero(ts, cds, props, ρ)
 
 Drag along −V̂ using a recorded C_D(t) (linearly interpolated, clamped at the

@@ -32,9 +32,9 @@
 using BreakingBallLBM
 using Printf
 
-# CBS Sports / SI, cited in DESIGN.md §8 V&V-5. No break definition is stated.
-const REPORTED_HORIZONTAL_IN = 17.0
-const REPORTED_VERTICAL_IN = -32.0   # a drop, so negative to match this run's sign
+# REPORTED_HORIZONTAL_IN / REPORTED_VERTICAL_IN (CBS Sports / SI, DESIGN.md §8
+# V&V-5, no definition stated) come from BreakingBallLBM — shared with
+# scripts/analyze_pitch.jl's catcher's-view marker rather than copied here.
 
 Base.@kwdef mutable struct BreakPlotConfig
     csv::String = "pitch.csv"

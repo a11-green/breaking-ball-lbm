@@ -142,7 +142,7 @@ julia --project=. scripts/run_pitch.jl --help                # 実行時の一�
 
 `run_pitch.jl` が書いた軌跡CSVを読み、位置・流入条件・速度・スピン・力係数・ソルバの健全性（残差・再カット数）をまとめて図にする（§7.4、段階2）。CSVの列は姿勢クォータニオン（`qw,qx,qy,qz`）とスピン（`wx,wy,wz`）を持つので、3D軌道パネルには**そのCFD計算が実際に持っていた向きの縫い目**を、任意の時刻にスクラブして表示できる（`view_pitch.jl` の解析モデル版と同じ仕組み）。
 
-捕手視点パネルには、`scripts/measure_break.jl`/`scripts/plot_break.jl` と同じpfx/induced/totalの3つの基準点を、実際の到達点への点線付きでマーカー表示する（`vx,vy,vz`列が無い古いCSVでは自動的に省略される）。
+捕手視点パネルには、`scripts/measure_break.jl`/`scripts/plot_break.jl` と同じpfx/induced/totalの3つの基準点を、実際の到達点への点線付きでマーカー表示する（`vx,vy,vz`列が無い古いCSVでは自動的に省略される）。あわせて、報道された変化量（17"/32"、出典DESIGN.md §8）を**total定義と同義と仮定した場合**の到達点も星印で表示する——`total_ref`（このシミュレーション自身の無力直線基準点）に報道値をそのまま足した仮想の点であり、実測でも当てはめでもない。
 
 ```bash
 julia --project=. scripts/analyze_pitch.jl pitch.csv

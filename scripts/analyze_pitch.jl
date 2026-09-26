@@ -364,6 +364,21 @@ function main(c::AnalyzeConfig)
                  text = "$name $(round(inches(h), digits = 1))\"/$(round(inches(v), digits = 1))\"",
                  fontsize = 9, color = col, align = (:center, :top), offset = (0, -8))
         end
+
+        # Where the ball would have landed if the reported WBC movement
+        # (§8 V&V-5, no definition stated) is read against the same baseline
+        # as `total` — the same assumption scripts/plot_break.jl's --assume
+        # total draws against, here as a point instead of a bar's reference
+        # line. It is not this run's total_ref_y/z redrawn: it is that
+        # baseline plus the *reported* 17"/32" instead of this run's own.
+        rep_y = brk.total_ref_y + REPORTED_HORIZONTAL_IN * INCH + c.shift_y
+        rep_z = brk.total_ref_z + REPORTED_VERTICAL_IN * INCH
+        lines!(axc, [rep_y, actual_y_s], [rep_z, brk.actual_z]; color = (:firebrick, 0.7),
+              linewidth = 1.5, linestyle = :dot)
+        scatter!(axc, [rep_y], [rep_z]; color = :firebrick, marker = :star5, markersize = 16)
+        text!(axc, rep_y, rep_z;
+             text = "reported $(REPORTED_HORIZONTAL_IN)\"/$(REPORTED_VERTICAL_IN)\" (≡ total)",
+             fontsize = 9, color = :firebrick, align = (:center, :top), offset = (0, -8))
     end
 
     # --- side view: true scale, rubber to plate, ground up — a real-world
