@@ -284,7 +284,7 @@ function main(c::AnalyzeConfig)
 
     geom = BaseballGeometry()
 
-    fig = Figure(size = (1600, 1200))
+    fig = Figure(size = (1600, 1450))
 
     # --- 3-D trajectory, with the ball and its seam at a scrubbable frame ---
     ax3d = Axis3(fig[1:3, 1]; aspect = :data, title = basename(c.csv),
@@ -308,7 +308,7 @@ function main(c::AnalyzeConfig)
     axislegend(ax3d; position = :lt, framevisible = false)
 
     frame = Observable(n)     # start at the end: the whole flight is already drawn
-    slider = Slider(fig[4, 1:3], range = 1:n, startvalue = n)
+    slider = Slider(fig[5, 1:3], range = 1:n, startvalue = n)
     on(v -> frame[] = v, slider.value)
 
     ball_scale_obs = Observable(c.ball_scale)
@@ -466,6 +466,34 @@ function main(c::AnalyzeConfig)
     hidespines!(axh2); hidexdecorations!(axh2)
     lines!(axh2, t, data[:recuts]; color = (:darkorange, 0.7))
 
+    # --- aerodynamic force: raw Fx,Fy,Fz (world frame — the momentum-exchange
+    #     force on the ball in the same x/y/z the trajectory is drawn in, not
+    #     the lattice frame ax_lat/ay_lat/az_lat is in). C_D/C_L/C_side above
+    #     are this same force decomposed onto (velocity, Magnus, and what's
+    #     left); this is it undecomposed, in newtons ---
+    axf = Axis(fig[4, 1:3]; title = "aerodynamic force, world frame " *
+              "(x toward the plate, y pitcher's left, z up)",
+              xlabel = "t (s)", ylabel = "N")
+    if all(haskey(data, k) for k in (:Fx, :Fy, :Fz))
+        for (name, col, colr) in (("F_x", data[:Fx], :steelblue),
+                                 ("F_y", data[:Fy], :seagreen),
+                                 ("F_z", data[:Fz], :firebrick))
+            lines!(axf, t, col; color = (colr, 0.25), linewidth = 1)
+            lines!(axf, t, moving_average(col, window); color = colr, linewidth = 2,
+                  label = name)
+        end
+        hlines!(axf, [0.0]; color = (:black, 0.4), linewidth = 1)
+        vlines!(axf, lift(i -> t[i], frame); color = (:black, 0.3))
+        f_text = lift(i -> @sprintf("F = (%.2f, %.2f, %.2f) N",
+                                    data[:Fx][i], data[:Fy][i], data[:Fz][i]), frame)
+        text!(axf, 0.02, 0.98; text = f_text, space = :relative,
+             align = (:left, :top), fontsize = 13)
+        axislegend(axf; position = :rt, framevisible = false, fontsize = 10, orientation = :horizontal)
+    else
+        text!(axf, 0.5, 0.5; text = "no Fx,Fy,Fz columns in this CSV", space = :relative,
+             align = (:center, :center), color = :gray50)
+    end
+
     if !isempty(c.record_to)
         frame[] = n
         save(c.record_to, fig)
@@ -474,7 +502,7 @@ function main(c::AnalyzeConfig)
     end
 
     # --- playback and camera controls ---
-    controls = GridLayout(fig[5, 1:3])
+    controls = GridLayout(fig[6, 1:3])
     reset_btn = Button(controls[1, 1]; label = "Reset")
     play_btn = Button(controls[1, 2]; label = "Play")
     mlb_btn = Button(controls[1, 3]; label = "MLB view")

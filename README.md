@@ -144,6 +144,8 @@ julia --project=. scripts/run_pitch.jl --help                # 実行時の一�
 
 捕手視点パネルには、`scripts/measure_break.jl`/`scripts/plot_break.jl` と同じpfx/induced/totalの3つの基準点を、実際の到達点への点線付きでマーカー表示する（`vx,vy,vz`列が無い古いCSVでは自動的に省略される）。あわせて、報道された変化量（17"/32"、出典DESIGN.md §8）を**total定義と同義と仮定した場合**の到達点も星印で表示する——`total_ref`（このシミュレーション自身の無力直線基準点）に報道値をそのまま足した仮想の点であり、実測でも当てはめでもない。
 
+力係数（C_D/C_L/C_side）パネルの下には、その分解前の生の力 `F_x,F_y,F_z`（静止座標系＝軌道を描いているのと同じx/y/z、単位N）を別パネルで表示する。`ax_lat`等のラティス（格子）座標系の力とは別物。`Fx,Fy,Fz`列が無い古いCSVでは自動的に省略される。
+
 ```bash
 julia --project=. scripts/analyze_pitch.jl pitch.csv
 julia --project=. scripts/analyze_pitch.jl pitch.csv --backend cairomakie --record report.png
