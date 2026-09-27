@@ -475,12 +475,23 @@ function main(c::AnalyzeConfig)
               "(x toward the plate, y pitcher's left, z up)",
               xlabel = "t (s)", ylabel = "N")
     if all(haskey(data, k) for k in (:Fx, :Fy, :Fz))
-        for (name, col, colr) in (("F_x", data[:Fx], :steelblue),
-                                 ("F_y", data[:Fy], :seagreen),
-                                 ("F_z", data[:Fz], :firebrick))
-            lines!(axf, t, col; color = (colr, 0.25), linewidth = 1)
-            lines!(axf, t, moving_average(col, window); color = colr, linewidth = 2,
-                  label = name)
+        # Weight, the one force the CFD doesn't measure and `advance` adds
+        # separately (see the panel comment and BreakingBallLBM's coupling.jl:
+        # `st.force` is the momentum-exchange force alone, gravity is added to
+        # the acceleration afterward). GRAVITY is purely -z, so the dotted
+        # "+ gravity" line only actually differs from its solid F_z — for
+        # F_x/F_y it sits exactly on top, which is the honest answer, not a
+        # bug: gravity does not push a pitch sideways.
+        weight = BaseballProperties().mass .* GRAVITY
+        cols = (data[:Fx], data[:Fy], data[:Fz])
+        names = ("F_x", "F_y", "F_z")
+        colors = (:steelblue, :seagreen, :firebrick)
+        for i in 1:3
+            lines!(axf, t, cols[i]; color = (colors[i], 0.25), linewidth = 1)
+            smoothed = moving_average(cols[i], window)
+            lines!(axf, t, smoothed; color = colors[i], linewidth = 2, label = names[i])
+            lines!(axf, t, smoothed .+ weight[i]; color = colors[i], linewidth = 2,
+                  linestyle = :dot, label = names[i] * " + gravity")
         end
         hlines!(axf, [0.0]; color = (:black, 0.4), linewidth = 1)
         vlines!(axf, lift(i -> t[i], frame); color = (:black, 0.3))
@@ -488,7 +499,8 @@ function main(c::AnalyzeConfig)
                                     data[:Fx][i], data[:Fy][i], data[:Fz][i]), frame)
         text!(axf, 0.02, 0.98; text = f_text, space = :relative,
              align = (:left, :top), fontsize = 13)
-        axislegend(axf; position = :rt, framevisible = false, fontsize = 10, orientation = :horizontal)
+        axislegend(axf; position = :rt, framevisible = false, fontsize = 10,
+                  orientation = :horizontal, nbanks = 2)
     else
         text!(axf, 0.5, 0.5; text = "no Fx,Fy,Fz columns in this CSV", space = :relative,
              align = (:center, :center), color = :gray50)
