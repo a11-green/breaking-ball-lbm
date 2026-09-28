@@ -11,15 +11,24 @@
 #   julia --project=. scripts/render_ball.jl --slices 48 --stacks 32
 #   julia --project=. scripts/render_ball.jl --help
 #
-# Writes a single ball.vtk in the snapshot directory — not a series, not one
-# file per frame. §4.4.2's ball-following frame keeps the box fixed to the
-# ball's centre of mass (`src/trajectory/frame.jl`): the ball spins in place
-# and never translates across the grid, so every seam frame reports the same
+# Writes a single ball.vtk in the snapshot directory — not one mesh file per
+# frame. §4.4.2's ball-following frame keeps the box fixed to the ball's
+# centre of mass (`src/trajectory/frame.jl`): the ball spins in place and
+# never translates across the grid, so every seam frame reports the same
 # centre and radius (this script checks that and errors out if a run ever
 # violates it). Only the seam moves, which is exactly what its own series is
-# for. Open ball.vtk once in ParaView alongside flow.vtk.series and
-# seam.vtk.series: a plain (non-series) source just sits there through the
-# whole animation while the other two play.
+# for.
+#
+# It still writes a ball.vtk.series alongside it, listing that one file at
+# every frame time seam.vtk.series has. A plain, seriesless source has *no*
+# timesteps as far as ParaView's temporal machinery is concerned, and asking
+# to save an animation walks every source across the scene's time range —
+# `vtkAdaptiveTemporalInterpolator` then fails outright ("Not enough input
+# time steps for interpolation") on the one source that never claimed to
+# have any, even though it renders fine as long as nobody hits Save
+# Animation. A series whose every entry names the same file costs one small
+# JSON, not N copies of the mesh, and gives ParaView a real timestep to sit
+# on at every frame.
 #
 # **Why the ball's centre and radius come from the seam file, not a config.**
 # The seam curve sits exactly on the ball's surface by construction
@@ -48,17 +57,20 @@ function parse_args(args)
             println("""
             render_ball.jl [options]
               --snapshot-dir DIR  where seam.vtk.series and seam-*.vtk already
-                                  live, and where ball.vtk is written
-                                  (default $(c.snapshot_dir))
+                                  live, and where ball.vtk/ball.vtk.series
+                                  are written (default $(c.snapshot_dir))
               --slices N          longitude divisions of the sphere mesh
                                   (default $(c.slices))
               --stacks N          latitude divisions (default $(c.stacks))
-            Writes one ball.vtk, not a series — the ball never translates in
-            the ball-following frame (§4.4.2), only the seam does, so a
-            single static mesh is correct for the whole run. The centre and
-            radius are read back off a seam frame, not passed in — see the
-            header comment. Run this after run_pitch.jl has finished writing
-            --snapshot frames; it does not touch the GPU.""")
+            Writes one ball.vtk mesh (the ball never translates in the
+            ball-following frame, §4.4.2, only the seam does, so a single
+            static mesh is correct for the whole run) plus a ball.vtk.series
+            naming that one file at every seam frame's time, so ParaView has
+            a real timestep to interpolate — needed for Save Animation to
+            work, even though the geometry itself never changes. The centre
+            and radius are read back off a seam frame, not passed in — see
+            the header comment. Run this after run_pitch.jl has finished
+            writing --snapshot frames; it does not touch the GPU.""")
             exit(0)
         elseif a == "--snapshot-dir"; c.snapshot_dir = take()
         elseif a == "--slices";       c.slices = parse(Int, take())
@@ -102,7 +114,7 @@ function ball_geometry(c::BallConfig, series_path::AbstractString)
         end
     end
 
-    return centre, radius, length(frames)
+    return centre, radius, frames
 end
 
 function main(c::BallConfig)
@@ -111,19 +123,32 @@ function main(c::BallConfig)
         error("no such file: $series_path — run_pitch.jl writes this alongside " *
               "the seam frames when given --snapshot N")
 
-    centre, radius, nframes = ball_geometry(c, series_path)
+    centre, radius, frames = ball_geometry(c, series_path)
 
     ball_path = joinpath(c.snapshot_dir, "ball.vtk")
     write_ball(ball_path, centre, radius; slices = c.slices, stacks = c.stacks,
               title = "ball")
 
+    ball_series_path = joinpath(c.snapshot_dir, "ball.vtk.series")
+    open(ball_series_path, "w") do io
+        println(io, "{")
+        println(io, "  \"file-series-version\" : \"1.0\",")
+        println(io, "  \"files\" : [")
+        for (n, f) in enumerate(frames)
+            @printf(io, "    { \"name\" : \"ball.vtk\", \"time\" : %.6f }%s\n",
+                    f.time, n == length(frames) ? "" : ",")
+        end
+        println(io, "  ]")
+        println(io, "}")
+    end
+
     @printf("checked %d frame(s): centre stays at (%.4f, %.4f, %.4f) m, radius %.5f m\n",
-            nframes, centre..., radius)
-    println("wrote ", ball_path)
-    println("Open flow.vtk.series and seam.vtk.series as usual, and ball.vtk ",
-            "once alongside them (not as a series — it does not change over ",
-            "the run). ParaView shows a plain source through the whole ",
-            "animation while the two series play.")
+            length(frames), centre..., radius)
+    println("wrote ", ball_path, " and ", ball_series_path)
+    println("Open flow.vtk.series, seam.vtk.series and ball.vtk.series together — ",
+            "ball.vtk.series names the same single mesh at every frame time, so ",
+            "ParaView has a real timestep to interpolate (needed for Save ",
+            "Animation) even though the geometry itself never changes.")
 end
 
 main(parse_args(ARGS))
