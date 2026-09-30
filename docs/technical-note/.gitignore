@@ -286,7 +286,7 @@ TSWLatexianTemp*
 #*Notes.bib
 
 # Generated PDFs (build outputs; rebuild with `make` or the VS Code recipe)
-/main.pdf
+# /main.pdf
 /diff.pdf
 
 # archive
