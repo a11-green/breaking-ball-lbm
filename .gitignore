@@ -15,3 +15,8 @@ Manifest.toml
 *.pvd
 *.h5
 output/
+
+*.dvi
+*.gz
+*.bbl
+
